@@ -8,22 +8,35 @@ from src.algorithms.prm import prm
 from src.algorithms.moead import moead
 from experiments.vis_data import build_vis_payload, save_vis_payload
 
+def meters_to_cells(env, value_m: float) -> float:
+    return float(value_m) / float(env.resolution)
 
-def default_start_goal_for_env(env: GridEnv, height: np.ndarray, z_offset: float = 5.0):
-    sx, sy = 5.0, 5.0
-    gx, gy = float(max(0, env.W - 60)), float(max(0, env.H - 70))
-    gx = max(gx, sx + 10.0)
-    gy = max(gy, sy + 10.0)
-    sz = max(float(height[int(round(sy)), int(round(sx))]) + z_offset, env.altitude_from_ground(sx, sy))
-    gz = max(float(height[int(round(gy)), int(round(gx))]) + z_offset, env.altitude_from_ground(gx, gy))
-    return np.array([sx, sy, sz], dtype=np.float32), np.array([gx, gy, gz], dtype=np.float32)
+def cells_to_meters(env, value_cells: float) -> float:
+    return float(value_cells) * float(env.resolution)
+
+def default_start_goal_for_env(env: GridEnv, height: np.ndarray, z_offset_m: float = 2.0):
+    res = float(env.resolution)
+    sx_m, sy_m = 25.0, 25.0
+    gx_m, gy_m = float(max(25.0 + 50.0, (env.W - 60) * res)), float(max(25.0 + 50.0, (env.H - 70) * res))
+
+    sx = meters_to_cells(env, sx_m)
+    sy = meters_to_cells(env, sy_m)
+    gx = meters_to_cells(env, gx_m)
+    gy = meters_to_cells(env, gy_m)
+
+    sx_i, sy_i = int(np.clip(round(sx), 0, env.W - 1)), int(np.clip(round(sy), 0, env.H - 1))
+    gx_i, gy_i = int(np.clip(round(gx), 0, env.W - 1)), int(np.clip(round(gy), 0, env.H - 1))
+
+    sz = float(height[sy_i, sx_i]) + float(z_offset_m)
+    gz = float(height[gy_i, gx_i]) + float(z_offset_m)
+    return np.array([float(sx_i), float(sy_i), sz], dtype=np.float32), np.array([float(gx_i), float(gy_i), gz], dtype=np.float32)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--terrain", type=str, required=True, help="path to .npz terrain file")
     ap.add_argument("--planner", type=str, default="rrt", choices=["rrt", "prm", "moead", "all"])
-    ap.add_argument("--inflate", type=int, default=1, help="inflate obstacles radius in cells")
+    ap.add_argument("--inflate", type=float, default=5.0, help="inflate obstacles radius in meters")
     ap.add_argument("--seed", type=int, default=0, help="planner seed (NOT terrain seed)")
     ap.add_argument("--rrt_iter", type=int, default=4000)
     ap.add_argument("--prm_samples", type=int, default=1200)
@@ -35,15 +48,32 @@ def main():
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)
     ap.add_argument("--out_json", type=str, default="", help="where to save visualization json")
+    ap.add_argument("--start", type=float, nargs=2, default=None, help="start point in meters: x_m y_m")
+    ap.add_argument("--goal", type=float, nargs=2, default=None, help="goal point in meters: x_m y_m")
+    ap.add_argument("--start_goal_z_offset", type=float, default=2.0, help="default start/goal altitude offset above local ground, in meters")
     args = ap.parse_args()
 
     env, height, meta = GridEnv.load_npz(args.terrain)
-    if args.inflate > 0:
-        env = env.inflate_obstacles(args.inflate)
+    inflate_cells = int(np.ceil(args.inflate / env.resolution)) if args.inflate > 0 else 0
+    if inflate_cells > 0:
+        env = env.inflate_obstacles(inflate_cells)
 
     if height is None:
         height = env.height
-    start, goal = default_start_goal_for_env(env, height, z_offset=5.0)
+
+    if args.start is None or args.goal is None:
+        start, goal = default_start_goal_for_env(env, height, z_offset_m=args.start_goal_z_offset)
+    else:
+        sx = meters_to_cells(env, float(args.start[0]))
+        sy = meters_to_cells(env, float(args.start[1]))
+        gx = meters_to_cells(env, float(args.goal[0]))
+        gy = meters_to_cells(env, float(args.goal[1]))
+        sx_i, sy_i = int(np.clip(round(sx), 0, env.W - 1)), int(np.clip(round(sy), 0, env.H - 1))
+        gx_i, gy_i = int(np.clip(round(gx), 0, env.W - 1)), int(np.clip(round(gy), 0, env.H - 1))
+        sz = float(height[sy_i, sx_i]) + float(args.start_goal_z_offset)
+        gz = float(height[gy_i, gx_i]) + float(args.start_goal_z_offset)
+        start = np.array([float(sx_i), float(sy_i), sz], dtype=np.float32)
+        goal = np.array([float(gx_i), float(gy_i), gz], dtype=np.float32)
 
     path_rrt = None
     path_prm = None
@@ -57,7 +87,7 @@ def main():
             print("RRT* failed to find a path.")
 
     if args.planner in ("prm", "all"):
-        path_prm, _ = prm(
+        path_prm, prm_graph = prm(
             env, start, goal,
             n_samples=args.prm_samples,
             k=args.prm_k,
@@ -67,6 +97,8 @@ def main():
         )
         if path_prm is None:
             print("PRM failed to find a path.")
+            if prm_graph is not None and getattr(prm_graph, "stats", None):
+                print("PRM stats:", prm_graph.stats)
 
     if args.planner in ("moead", "all"):
         _, arch, log = moead(env, start, goal, n_gen=args.moead_gen, pop=args.moead_pop, K=args.K, T=args.moead_T, seed=args.seed)

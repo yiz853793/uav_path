@@ -209,7 +209,7 @@ def main():
     elif size_tag == "M" and rrt_iter == 50000:
         rrt_iter = 100_000
     path_rrt, _ = rrt_star(env, start, goal, n_iter=rrt_iter, seed=args.planner_seed)
-    path_prm, _ = prm(
+    path_prm, prm_graph = prm(
         env, start, goal,
         n_samples=args.prm_samples,
         k=args.prm_k,
@@ -217,6 +217,8 @@ def main():
         threat_weight=args.prm_threat_weight,
         seed=args.planner_seed,
     )
+    if prm_graph is not None and getattr(prm_graph, "stats", None):
+        print("PRM stats:", prm_graph.stats, flush=True)
 
     debug_log_path = None
     if args.debug or (args.debug_log is not None and args.debug_log.strip()):

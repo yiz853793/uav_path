@@ -11,6 +11,12 @@ venv/
 ENV/
 env/
 
+# 如果前面有更大的忽略规则，比如 src/ 或 src/*
+# 需要先保留父目录可见
+!src/
+!src/env/
+!src/env/**
+
 # Local env files (secrets / machine-specific)
 .env
 .env.*
@@ -75,9 +81,10 @@ pareto_points_*.json
 
 # Temporary working folders
 work/
-tmp/
+tmp*/
 wandb/
 runs/
+*debug*/
 
 # Large binary artifacts (optional)
 *.npz

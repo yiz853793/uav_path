@@ -16,6 +16,11 @@ from src.algorithms.moead import moead
 from src.models.evaluator import evaluate_path
 from experiments.vis_data import build_vis_payload, save_vis_payload
 
+def meters_to_cells(env, value_m: float) -> float:
+    return float(value_m) / float(env.resolution)
+
+def cells_to_meters(env, value_cells: float) -> float:
+    return float(value_cells) * float(env.resolution)
 
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
@@ -64,26 +69,34 @@ def moead_core_tag_from_args(args) -> str:
 def default_start_goal_for_env(
     env: GridEnv,
     height: np.ndarray,
-    z_offset: float = 5
+    z_offset_m: float = 2.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     W, H = env.W, env.H
-    sx, sy = 5.0, 5.0
-    gx, gy = float(max(0, W - 60)), float(max(0, H - 70))
-    gx = max(gx, sx + 10.0)
-    gy = max(gy, sy + 10.0)
+    res = float(env.resolution)
+
+    # 固定默认起终点（命令语义按“米”理解）
+    sx_m, sy_m = 25.0, 25.0
+    gx_m, gy_m = float(max(25.0 + 50.0, (W - 60) * res)), float(max(25.0 + 50.0, (H - 70) * res))
+
+    sx = meters_to_cells(env, sx_m)
+    sy = meters_to_cells(env, sy_m)
+    gx = meters_to_cells(env, gx_m)
+    gy = meters_to_cells(env, gy_m)
 
     sx_i, sy_i = int(round(sx)), int(round(sy))
     gx_i, gy_i = int(round(gx)), int(round(gy))
 
-    sz_ground = float(height[sy_i, sx_i])
-    gz_ground = float(height[gy_i, gx_i])
+    sx_i = int(np.clip(sx_i, 0, W - 1))
+    sy_i = int(np.clip(sy_i, 0, H - 1))
+    gx_i = int(np.clip(gx_i, 0, W - 1))
+    gy_i = int(np.clip(gy_i, 0, H - 1))
 
-    sz = max(sz_ground + z_offset, env.altitude_from_ground(sx, sy))
-    gz = max(gz_ground + z_offset, env.altitude_from_ground(gx, gy))
+    sz = float(height[sy_i, sx_i]) + float(z_offset_m)
+    gz = float(height[gy_i, gx_i]) + float(z_offset_m)
 
     return (
-        np.array([sx, sy, sz], dtype=np.float32),
-        np.array([gx, gy, gz], dtype=np.float32),
+        np.array([float(sx_i), float(sy_i), sz], dtype=np.float32),
+        np.array([float(gx_i), float(gy_i), gz], dtype=np.float32),
     )
 
 
@@ -224,12 +237,12 @@ def summarize_results(all_rows: list, log_path: str, args):
         text.append("")
     text.append("-" * 80)
     text.append("Experiment Parameters:")
-    text.append(f"  inflate = {args.inflate}")
+    text.append(f"  inflate = {args.inflate} m")
     text.append(f"  rrt_iter = {args.rrt_iter}")
     text.append("  PRM:")
     text.append(f"    prm_samples      = {args.prm_samples}")
     text.append(f"    prm_k            = {args.prm_k}")
-    text.append(f"    prm_max_edge_len = {args.prm_max_edge_len}")
+    text.append(f"    prm_max_edge_len = {args.prm_max_edge_len} m")
     text.append(f"    prm_threat_weight= {args.prm_threat_weight}")
     text.append("")
     text.append("  MOEA/D core:")
@@ -253,6 +266,24 @@ def summarize_results(all_rows: list, log_path: str, args):
     text.append(f"PRM: found {prm_found}/{n_valid} ({prm_found/denom*100:.2f}%), runtime_ms mean±std = {prm_mean:.1f} ± {prm_std:.1f}  (valid-only)")
     if prm_obj_stats:
         text.append(prm_obj_stats)
+
+    prm_valid_stats = [r.get("prm_stats") for r in valid_rows if isinstance(r.get("prm_stats"), dict) and r.get("prm_stats")]
+    if prm_valid_stats:
+        def _avg(key):
+            vals = [float(s.get(key, 0.0)) for s in prm_valid_stats]
+            return float(np.mean(vals)), float(np.std(vals))
+        sd_m, sd_s = _avg("start_degree")
+        gd_m, gd_s = _avg("goal_degree")
+        sc_m, sc_s = _avg("start_component_size")
+        lc_m, lc_s = _avg("largest_component_size")
+        conn = sum(1 for s in prm_valid_stats if bool(s.get("start_goal_connected", False)))
+        text.append(
+            f"PRM connectivity: start_degree mean±std = {sd_m:.2f} ± {sd_s:.2f}, "
+            f"goal_degree mean±std = {gd_m:.2f} ± {gd_s:.2f}, "
+            f"start_component_size mean±std = {sc_m:.1f} ± {sc_s:.1f}, "
+            f"largest_component_size mean±std = {lc_m:.1f} ± {lc_s:.1f}, "
+            f"start-goal connected {conn}/{len(prm_valid_stats)} ({conn/max(1,len(prm_valid_stats))*100:.2f}%)"
+        )
     text.append(f"MOEA/D: archive>0 {moead_has_arch}/{n_valid} ({moead_has_arch/denom*100:.2f}%), runtime_ms mean±std = {moead_mean:.1f} ± {moead_std:.1f}  (valid-only)")
     text.append(f"MOEA/D: archive_size mean±std = {arch_mean:.2f} ± {arch_std:.2f}")
 
@@ -300,7 +331,7 @@ def main():
     ap.add_argument("--glob", type=str, default="", help="optional terrain glob, e.g. 'terrains/*/mountain_seed*.npz'")
 
     ap.add_argument("--planner_seed", type=int, default=0)
-    ap.add_argument("--inflate", type=int, default=1)
+    ap.add_argument("--inflate", type=float, default=5.0, help="inflate obstacle radius in meters")
 
     ap.add_argument("--rrt_iter", type=int, default=4000)
     ap.add_argument("--prm_samples", type=int, default=1200)
@@ -327,26 +358,26 @@ def main():
     ap.add_argument(
         "--moead_eval_step",
         type=float,
-        default=0.5,
-        help="sample step for evaluation (collision + threat). Larger => much faster but less precise.",
+        default=2.5,
+        help="sample step for evaluation (collision + threat), in meters. Larger => much faster but less precise.",
     )
     ap.add_argument(
         "--moead_smooth_step",
         type=float,
-        default=0.5,
-        help="sample step for shortcut-smooth collision checks. Larger => faster.",
+        default=2.5,
+        help="sample step for shortcut-smooth collision checks, in meters. Larger => faster.",
     )
 
     # start/goal：允许 AUTO（不传即自动按地图尺寸生成）
-    ap.add_argument("--start", type=float, nargs=2, default=None)
-    ap.add_argument("--goal", type=float, nargs=2, default=None)
+    ap.add_argument("--start", type=float, nargs=2, default=None, help="start point in meters: x_m y_m")
+    ap.add_argument("--goal", type=float, nargs=2, default=None, help="goal point in meters: x_m y_m")
 
     ap.add_argument("--summary_log", type=str, default="", help="append overall summary to this log file (default: out_root/benchmark_summary.log)")
     ap.add_argument(
         "--start_goal_z_offset",
         type=float,
-        default=5,
-        help="default start/goal altitude offset above local ground",
+        default=15.0,
+        help="default start/goal altitude offset above local ground, in meters",
     )
     args = ap.parse_args()
 
@@ -397,8 +428,9 @@ def main():
                 terrain_seed = None
 
         env, height, meta = GridEnv.load_npz(tp)
-        if args.inflate > 0:
-            env = env.inflate_obstacles(args.inflate)
+        inflate_cells = int(np.ceil(args.inflate / env.resolution)) if args.inflate > 0 else 0
+        if inflate_cells > 0:
+            env = env.inflate_obstacles(inflate_cells)
 
         if isinstance(meta, dict):
             size_tag = str(meta.get("map_size", {}).get("tag", map_size_name(env.H, env.W)))
@@ -419,43 +451,55 @@ def main():
             start, goal = default_start_goal_for_env(
                 env,
                 height,
-                z_offset=args.start_goal_z_offset,
+                z_offset_m=args.start_goal_z_offset,
             )
         else:
-            sx, sy = float(args.start[0]), float(args.start[1])
-            gx, gy = float(args.goal[0]), float(args.goal[1])
+            sx_m, sy_m = float(args.start[0]), float(args.start[1])
+            gx_m, gy_m = float(args.goal[0]), float(args.goal[1])
+
+            sx = meters_to_cells(env, sx_m)
+            sy = meters_to_cells(env, sy_m)
+            gx = meters_to_cells(env, gx_m)
+            gy = meters_to_cells(env, gy_m)
 
             sx_i, sy_i = int(round(sx)), int(round(sy))
             gx_i, gy_i = int(round(gx)), int(round(gy))
 
+            sx_i = int(np.clip(sx_i, 0, env.W - 1))
+            sy_i = int(np.clip(sy_i, 0, env.H - 1))
+            gx_i = int(np.clip(gx_i, 0, env.W - 1))
+            gy_i = int(np.clip(gy_i, 0, env.H - 1))
+
             sz = float(height[sy_i, sx_i]) + args.start_goal_z_offset
             gz = float(height[gy_i, gx_i]) + args.start_goal_z_offset
 
-            start = np.array([sx, sy, sz], dtype=np.float32)
-            goal = np.array([gx, gy, gz], dtype=np.float32)
+            start = np.array([float(sx_i), float(sy_i), sz], dtype=np.float32)
+            goal = np.array([float(gx_i), float(gy_i), gz], dtype=np.float32)
 
-        # ---- invalid case handling (start/goal in no-fly or out of bounds) ----
+        # ---- invalid case handling ----
+        # 起降点不再直接因为 occupancy 判 invalid；这里只检查越界和是否低于地表
         invalid_start = False
         invalid_goal = False
         reason = []
-        if occupancy is not None:
-            sx, sy = int(round(float(start[0]))), int(round(float(start[1])))
-            gx, gy = int(round(float(goal[0]))), int(round(float(goal[1])))
-            # bounds
-            if sx < 0 or sx >= env.W or sy < 0 or sy >= env.H:
+
+        sx, sy = int(round(float(start[0]))), int(round(float(start[1])))
+        gx, gy = int(round(float(goal[0]))), int(round(float(goal[1])))
+
+        if sx < 0 or sx >= env.W or sy < 0 or sy >= env.H:
+            invalid_start = True
+            reason.append("start_oob")
+        else:
+            if float(start[2]) < float(height[sy, sx]):
                 invalid_start = True
-                reason.append("start_oob")
-            else:
-                if bool(occupancy[sy, sx]):
-                    invalid_start = True
-                    reason.append("start_in_no_fly")
-            if gx < 0 or gx >= env.W or gy < 0 or gy >= env.H:
+                reason.append("start_below_ground")
+
+        if gx < 0 or gx >= env.W or gy < 0 or gy >= env.H:
+            invalid_goal = True
+            reason.append("goal_oob")
+        else:
+            if float(goal[2]) < float(height[gy, gx]):
                 invalid_goal = True
-                reason.append("goal_oob")
-            else:
-                if bool(occupancy[gy, gx]):
-                    invalid_goal = True
-                    reason.append("goal_in_no_fly")
+                reason.append("goal_below_ground")
 
         invalid_case = bool(invalid_start or invalid_goal)
         if invalid_case:
@@ -542,6 +586,9 @@ def main():
             print("[skip-invalid]", base, "reason=", ",".join(reason), "->", out_dir)
             continue
 
+        eval_step_cells = args.moead_eval_step / env.resolution
+        smooth_step_cells = args.moead_smooth_step / env.resolution
+
         # ---- RRT* ----
         t0 = time.time()
         path_rrt, _ = rrt_star(env, start, goal, n_iter=args.rrt_iter, seed=args.planner_seed)
@@ -551,7 +598,7 @@ def main():
         # - if no path: set to +INF for easy downstream stats / plotting
         # - if path exists: evaluate (also record feasibility + violation for debugging)
         if path_rrt is not None:
-            rrt_er = evaluate_path(env, path_rrt, sample_step=args.moead_eval_step)
+            rrt_er = evaluate_path(env, path_rrt, sample_step=eval_step_cells)
             rrt_obj = [float(rrt_er.obj[0]), float(rrt_er.obj[1]), float(rrt_er.obj[2])]
             rrt_feasible = bool(rrt_er.feasible)
             rrt_violation = float(rrt_er.violation)
@@ -565,7 +612,7 @@ def main():
 
         # ---- PRM ----
         t0b = time.time()
-        path_prm, _ = prm(
+        path_prm, prm_graph = prm(
             env, start, goal,
             n_samples=args.prm_samples,
             k=args.prm_k,
@@ -576,17 +623,20 @@ def main():
         prm_ms = (time.time() - t0b) * 1000.0
 
         if path_prm is not None:
-            prm_er = evaluate_path(env, path_prm, sample_step=args.moead_eval_step)
+            prm_er = evaluate_path(env, path_prm, sample_step=eval_step_cells)
             prm_obj = [float(prm_er.obj[0]), float(prm_er.obj[1]), float(prm_er.obj[2])]
             prm_feasible = bool(prm_er.feasible)
             prm_violation = float(prm_er.violation)
             prm_detail = dict(prm_er.detail)
         else:
+            path_prm = None
             prm_er = None
             prm_obj = [float("inf"), float("inf"), float("inf")]
             prm_feasible = False
             prm_violation = float("inf")
             prm_detail = None
+
+        prm_stats = getattr(prm_graph, "stats", {}) if prm_graph is not None else {}
 
         # ---- MOEA/D ----
         t1 = time.time()
@@ -598,8 +648,8 @@ def main():
             K=args.K,
             T=args.moead_T,
             seed=args.planner_seed,
-            eval_sample_step=args.moead_eval_step,
-            smooth_collision_step=args.moead_smooth_step,
+            eval_sample_step=eval_step_cells,
+            smooth_collision_step=smooth_step_cells,
             debug_log_path=moead_debug_log,
             debug_every=args.moead_debug_every,
             debug_level=args.moead_debug_level,
@@ -699,6 +749,7 @@ def main():
                 "feasible": prm_feasible if path_prm is not None else False,
                 "violation": prm_violation if path_prm is not None else None,
                 "detail": prm_detail if path_prm is not None else None,
+                "stats": prm_stats,
             },
             "moead": {
                 "n_gen": args.moead_gen,
