@@ -11,6 +11,12 @@
 当前支持三类地形：
 
 - **mountain**：山地地形，支持 `S / M / L` 三档尺寸
+
+MOEA/D 相关脚本现在统一支持两个新增参数：
+
+- `--archive_size`：archive 上限；`<= 0` 表示**不设上限**
+- `--active_subproblem_ratio`：每代实际激活的子问题比例，范围 `(0, 1]`
+
 - **city**：纯城市场景，固定为 **1600 × 2000**
 - **hill_city**：山地城市混合场景，固定为 **1600 × 2000**，用于更接近真实 UAV 城市低空规划的测试
 
@@ -236,6 +242,30 @@ shape=1600x2000, param_density=0.1200, actual_occupancy=0.5431, z_max=108.00
 
 # 5. 单次规划
 
+## 5.4 MOEA/D 加速版新增参数
+
+以下四个入口已经统一支持同一组 MOEA/D 新参数：
+
+- `main.py`
+- `experiments/plan_from_terrain.py`
+- `experiments/run_benchmark.py`
+- `README` 中的示例命令
+
+重点参数：
+
+```bash
+--archive_size 0
+--active_subproblem_ratio 0.80
+```
+
+含义：
+
+- `--archive_size 0`：不限制 Pareto archive 大小
+- `--active_subproblem_ratio 0.80`：每代只重点演化 80% 的子问题，用于加速
+
+`benchmark_summary.log` 里也会报告这两个参数。
+
+
 从已有 `.npz` 做单次规划：
 
 ```bash
@@ -303,10 +333,11 @@ python -m experiments.run_benchmark \
   --out_root outputs
 ```
 
-benchmark 输出两类文件：
+benchmark 输出文件：
 
-- `metrics_*.json`：数值统计
+- `metrics_*.json`：数值统计（不包含 debug 诊断）
 - `visdata_*.json`：后处理渲染输入
+- `mtoe_debug_*.log`：仅在开启调试时输出的 MTOE / MOEA/D 调试日志
 
 ---
 
@@ -367,15 +398,31 @@ python -m experiments.run_benchmark \
   --prm_k 48 \
   --prm_max_edge_len 250 \
   --prm_threat_weight 0.0 \
-  --moead_gen 80 \
-  --moead_pop 60 \
+  --moead_pop 160 \
+  --moead_min_gen 80 \
+  --moead_max_gen 500 \
+  --mtoe_tol_fun 1e-5 \
+  --mtoe_confidence 0.99 \
   --K 30 \
-  --moead_T 10 \
-  --init_astar_ratio 0.25 \
-  --init_astar_max_paths 5 \
-  --init_astar_penalty_step 2.5 \
-  --init_astar_threat_weight 0.0 \
-  --init_astar_jitter_sigma 1.5 \
+  --moead_T 16 \
+  --init_astar_ratio 0.20 \
+  --init_astar_threat_weight 2.0 \
+  --init_astar_max_paths 6 \
+  --init_stratified_ratio 0.60 \
+  --init_global_random_ratio 0.15 \
+  --weight_extreme_bias 0.20 \
+  --extreme_offspring_ratio 0.20 \
+  --extreme_potential_window 20 \
+  --extreme_min_extra_per_obj 1 \
+  --extreme_max_frac_per_obj 0.60 \
+  --local_search_interval 10 \
+  --local_search_elite_k 3 \
+  --local_search_attempts_per_obj 2 \
+  --archive_size 0 \
+  --active_subproblem_ratio 0.80 \
+  --utility_update_interval 3 \
+  --utility_use_archive_density 0 \
+  --log_flush_every 10 \
   --moead_debug
 python -m experiments.render_from_vis_json --input outputs/hill_city_0.24 --mode all --project_root .
 ```

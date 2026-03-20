@@ -18,6 +18,20 @@ def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
 
+def split_moead_log(log):
+    log = log if isinstance(log, dict) else {}
+    if not log:
+        return {}, {}
+    metric_keys = {
+        "n_gen", "configured_n_gen", "requested_n_gen", "pop", "K", "T", "n_eval",
+        "archive_size", "max_gen", "moead_min_gen", "mtoe_enabled", "mtoe_mode",
+        "mtoe_tol_fun", "mtoe_confidence", "stop_reason", "mtoe_window", "ideal_point",
+    }
+    metric_log = {k: log[k] for k in metric_keys if k in log}
+    debug_log = {k: v for k, v in log.items() if k not in metric_keys}
+    return metric_log, debug_log
+
+
 def map_size_to_hw(size: str):
     size = (size or "").lower()
     if size in ("s", "small"):
@@ -115,7 +129,10 @@ def main():
     ap.add_argument("--prm_threat_weight", type=float, default=0.0)
 
     # MOEA/D core
-    ap.add_argument("--moead_gen", type=int, default=80)
+    ap.add_argument("--moead_min_gen", type=int, default=20)
+    ap.add_argument("--moead_max_gen", type=int, default=None)
+    ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
+    ap.add_argument("--mtoe_confidence", type=float, default=0.99)
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)
@@ -127,6 +144,27 @@ def main():
     ap.add_argument("--init_astar_max_paths", type=int, default=5)
     ap.add_argument("--init_astar_penalty_step", type=float, default=2.5)
     ap.add_argument("--init_astar_max_expansions", type=int, default=None, help="A* 扩展上限，默认按地图面积自动")
+    ap.add_argument("--init_stratified_ratio", type=float, default=0.60)
+    ap.add_argument("--init_stratified_lateral_frac", type=float, default=0.30)
+    ap.add_argument("--init_stratified_n_bands", type=int, default=5)
+    ap.add_argument("--init_stratified_progress_jitter", type=float, default=0.08)
+    ap.add_argument("--init_global_random_ratio", type=float, default=0.15)
+    ap.add_argument("--weight_extreme_bias", type=float, default=0.20)
+    ap.add_argument("--extreme_offspring_ratio", type=float, default=0.20)
+    ap.add_argument("--extreme_potential_window", type=int, default=20)
+    ap.add_argument("--extreme_min_extra_per_obj", type=int, default=1)
+    ap.add_argument("--extreme_max_frac_per_obj", type=float, default=0.70)
+    ap.add_argument("--local_search_interval", type=int, default=10)
+    ap.add_argument("--local_search_elite_k", type=int, default=3)
+    ap.add_argument("--local_search_attempts_per_obj", type=int, default=2)
+    ap.add_argument("--archive_size", type=int, default=0, help="MOEA/D archive upper bound (>0 uses hard cap; <=0 falls back to archive_soft_limit)")
+    ap.add_argument("--archive_soft_limit", type=int, default=320, help="soft archive cap used when archive_size<=0; improves Pareto spread")
+    ap.add_argument("--archive_grid_bins", type=int, default=0, help="objective-space grid bins for diversity-aware archive truncation (0=auto)")
+    ap.add_argument("--archive_keep_extremes", type=int, default=1, help="protect objective extremes during archive truncation (1/0)")
+    ap.add_argument("--active_subproblem_ratio", type=float, default=1.0, help="fraction of subproblems activated each generation (0,1]")
+    ap.add_argument("--utility_update_interval", type=int, default=3, help="update MOEA/D utility every N generations")
+    ap.add_argument("--utility_use_archive_density", type=int, default=0, help="whether to mix archive density into utility update (1/0)")
+    ap.add_argument("--log_flush_every", type=int, default=10, help="flush MOEA/D debug log every N generations")
 
     # start/goal：默认 AUTO（不传则按尺寸自动设）
     ap.add_argument("--start", type=float, nargs="+", default=None)
@@ -137,12 +175,14 @@ def main():
 
     # Debug：MOEA/D 每代日志写入文件，并可实时输出到控制台（与 run_benchmark 一致）
     ap.add_argument("--debug", action="store_true", help="开启 MOEA/D 调试日志（写文件并实时打屏）")
-    ap.add_argument("--debug_log", type=str, default=None, help="调试日志路径，默认在 --debug 时为 out_dir/moead_debug.log")
+    ap.add_argument("--debug_log", type=str, default=None, help="调试日志路径，默认在 --debug 时为 out_dir/mtoe_debug.log")
     ap.add_argument("--debug_every", type=int, default=1, help="每多少代打印一条日志")
     ap.add_argument("--debug_level", type=int, default=2, choices=[1, 2, 3], help="1=简要 2=含耗时 3=含碰撞统计")
     ap.add_argument("--no_debug_console", action="store_true", help="开启 --debug 时仅写文件、不实时打屏")
 
     args = ap.parse_args()
+    if args.moead_max_gen is None:
+        args.moead_max_gen = 80
 
     if args.terrain_type in ("city", "hill_city"):
         H, W = 1600, 2000
@@ -222,26 +262,52 @@ def main():
 
     debug_log_path = None
     if args.debug or (args.debug_log is not None and args.debug_log.strip()):
-        debug_log_path = (args.debug_log or "").strip() or os.path.join(out_dir, "moead_debug.log")
+        debug_log_path = (args.debug_log or "").strip() or os.path.join(out_dir, "mtoe_debug.log")
     # 与 run_benchmark 一致：开启 debug 时默认实时打屏，--no_debug_console 则仅写文件
     debug_console = bool(debug_log_path) and not args.no_debug_console
 
     _, arch, log = moead(
         env, start, goal,
-        n_gen=args.moead_gen, pop=args.moead_pop, K=args.K, T=args.moead_T, seed=args.planner_seed,
+        n_gen=args.moead_max_gen, pop=args.moead_pop, K=args.K, T=args.moead_T, seed=args.planner_seed,
+        moead_min_gen=args.moead_min_gen,
+        moead_max_gen=args.moead_max_gen,
+        mtoe_tol_fun=args.mtoe_tol_fun,
+        mtoe_confidence=args.mtoe_confidence,
         init_astar_ratio=args.init_astar_ratio,
         init_astar_threat_weight=args.init_astar_threat_weight,
         init_astar_jitter_sigma=args.init_astar_jitter_sigma,
         init_astar_max_paths=args.init_astar_max_paths,
         init_astar_penalty_step=args.init_astar_penalty_step,
         init_astar_max_expansions=args.init_astar_max_expansions,
+        init_stratified_ratio=getattr(args, "init_stratified_ratio", 0.60),
+        init_stratified_lateral_frac=getattr(args, "init_stratified_lateral_frac", 0.30),
+        init_stratified_n_bands=getattr(args, "init_stratified_n_bands", 5),
+        init_stratified_progress_jitter=getattr(args, "init_stratified_progress_jitter", 0.08),
+        init_global_random_ratio=getattr(args, "init_global_random_ratio", 0.15),
+        weight_extreme_bias=getattr(args, "weight_extreme_bias", 0.20),
+        extreme_offspring_ratio=getattr(args, "extreme_offspring_ratio", 0.20),
+        extreme_potential_window=getattr(args, "extreme_potential_window", 20),
+        extreme_min_extra_per_obj=getattr(args, "extreme_min_extra_per_obj", 1),
+        extreme_max_frac_per_obj=getattr(args, "extreme_max_frac_per_obj", 0.70),
+        local_search_interval=getattr(args, "local_search_interval", 10),
+        local_search_elite_k=getattr(args, "local_search_elite_k", 3),
+        local_search_attempts_per_obj=getattr(args, "local_search_attempts_per_obj", 2),
+        archive_size=getattr(args, "archive_size", 0),
+        archive_soft_limit=getattr(args, "archive_soft_limit", 320),
+        archive_grid_bins=getattr(args, "archive_grid_bins", 0),
+        archive_keep_extremes=bool(getattr(args, "archive_keep_extremes", 1)),
+        active_subproblem_ratio=getattr(args, "active_subproblem_ratio", 1.0),
+        utility_update_interval=getattr(args, "utility_update_interval", 3),
+        utility_use_archive_density=bool(getattr(args, "utility_use_archive_density", 0)),
+        log_flush_every=getattr(args, "log_flush_every", 10),
         debug_log_path=debug_log_path,
         debug_every=args.debug_every,
         debug_level=args.debug_level,
         debug_console=debug_console,
     )
 
-    # 保存 log（文件名带 A* 参数）
+    # 保存 log（文件名带 A* 参数）；debug 细节单独放到 *_debug*.json
+    metric_log, debug_log = split_moead_log(log)
     log_path = os.path.join(out_dir, f"log_seed{args.terrain_seed:04d}_pseed{args.planner_seed:04d}_{size_tag}{atag}.json")
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -250,6 +316,18 @@ def main():
             "map_size": {"H": H, "W": W, "tag": size_tag},
             "terrace_levels": args.terrace_levels,
             "inflate": args.inflate,
+            "moead_min_gen": args.moead_min_gen,
+            "moead_max_gen": args.moead_max_gen,
+            "mtoe_tol_fun": args.mtoe_tol_fun,
+            "mtoe_confidence": args.mtoe_confidence,
+            "archive_size": args.archive_size,
+            "archive_soft_limit": args.archive_soft_limit,
+            "archive_grid_bins": args.archive_grid_bins,
+            "archive_keep_extremes": int(args.archive_keep_extremes),
+            "utility_update_interval": args.utility_update_interval,
+            "utility_use_archive_density": int(args.utility_use_archive_density),
+            "log_flush_every": args.log_flush_every,
+            "active_subproblem_ratio": args.active_subproblem_ratio,
             "start": start.tolist(),
             "goal": goal.tolist(),
             "rrt_iter": args.rrt_iter,
@@ -261,7 +339,7 @@ def main():
                 "found": path_prm is not None,
             },
             "moead": {
-                "n_gen": args.moead_gen,
+                "n_gen": args.moead_max_gen,
                 "pop": args.moead_pop,
                 "K": args.K,
                 "T": args.moead_T,
@@ -272,9 +350,18 @@ def main():
                 "init_astar_penalty_step": args.init_astar_penalty_step,
             },
             "meta": meta,
-            "log": log,
+            "log": metric_log,
             "archive_size": len(arch.items),
         }, f, ensure_ascii=False, indent=2)
+    if debug_log:
+        debug_log_path = os.path.join(out_dir, f"mtoe_debug_seed{args.terrain_seed:04d}_pseed{args.planner_seed:04d}_{size_tag}{atag}.log")
+        write_mtoe_debug_log(
+            debug_log_path,
+            terrain_seed=args.terrain_seed,
+            planner_seed=args.planner_seed,
+            debug_payload=debug_log,
+        )
+        print("saved debug log:", debug_log_path, flush=True)
     print("saved log:", log_path, flush=True)
 
     # -----------------------------

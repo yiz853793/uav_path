@@ -7,7 +7,9 @@ import time
 import logging
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from collections import deque
+from scipy.stats import chi2
 from ..env.grid_env import GridEnv
 from ..env.collision import segment_collision, sampled_points_array
 from ..models.evaluator import evaluate_path, EvalResult
@@ -133,10 +135,13 @@ def tchebycheff(f: np.ndarray, w: np.ndarray, z: np.ndarray) -> float:
     return float(np.max(w * np.abs(f - z)))
 
 
-def uniform_weights(m: int, n: int, seed: int = 0) -> np.ndarray:
-    """
-    生成 simplex 上的权重向量
-    - m=3 时用规则网格 + 随机补齐（够毕设）
+def uniform_weights(m: int, n: int, seed: int = 0, extreme_bias: float = 0.20) -> np.ndarray:
+    """Generate simplex weights with corner intensification.
+
+    For m=3 we explicitly make the corners denser than the center, following the
+    spirit of corner-weight intensification: a dense boundary/corner bank is
+    mixed with a much sparser interior bank. This gives better extreme-point
+    coverage while still keeping central trade-off subproblems.
     """
     rng = np.random.default_rng(seed)
     if m != 3:
@@ -144,24 +149,74 @@ def uniform_weights(m: int, n: int, seed: int = 0) -> np.ndarray:
         w = w / np.sum(w, axis=1, keepdims=True)
         return w.astype(np.float64)
 
-    ws = []
-    k = int(np.sqrt(n)) + 1
-    for i in range(k):
-        for j in range(k):
-            a = i / (k - 1)
-            b = j / (k - 1)
-            if a + b <= 1.0:
-                ws.append([a, b, 1.0 - a - b])
+    n = int(max(1, n))
+    extreme_bias = float(np.clip(extreme_bias, 0.0, 0.60))
 
-    rng.shuffle(ws)
-    ws = ws[:n]
-    if len(ws) < n:
-        extra = rng.random((n - len(ws), 3))
+    def _simplex_grid(level: int) -> list[list[float]]:
+        level = int(max(1, level))
+        pts: list[list[float]] = []
+        for i in range(level + 1):
+            for j in range(level + 1 - i):
+                k = level - i - j
+                pts.append([i / level, j / level, k / level])
+        return pts
+
+    dense_level = max(6, int(np.sqrt(max(9, n))) + 4)
+    sparse_level = max(2, dense_level // 3)
+    dense = np.array(_simplex_grid(dense_level), dtype=np.float64)
+    sparse = np.array(_simplex_grid(sparse_level), dtype=np.float64)
+
+    # corner bank: points where one weight dominates strongly
+    corner_thr = 1.0 - max(0.10, 0.55 * (1.0 - extreme_bias))
+    dense_corner_mask = np.max(dense, axis=1) >= corner_thr
+    dense_corner = dense[dense_corner_mask]
+    dense_other = dense[~dense_corner_mask]
+
+    # interior bank: prefer central / non-corner weights from the sparse grid
+    sparse_center_mask = np.max(sparse, axis=1) <= 0.80
+    sparse_center = sparse[sparse_center_mask] if np.any(sparse_center_mask) else sparse
+
+    n_corner = int(np.clip(round(n * (0.30 + 0.90 * extreme_bias)), 3, n))
+    n_center = max(0, n - n_corner)
+
+    ws: list[np.ndarray] = []
+    if len(dense_corner) > 0:
+        idx = rng.choice(len(dense_corner), size=min(n_corner, len(dense_corner)), replace=False)
+        ws.append(dense_corner[idx])
+    if len(sparse_center) > 0 and n_center > 0:
+        replace = len(sparse_center) < n_center
+        idx = rng.choice(len(sparse_center), size=n_center, replace=replace)
+        ws.append(sparse_center[idx])
+
+    if ws:
+        w = np.vstack(ws)
+    else:
+        w = rng.random((n, 3))
+
+    # fill any missing slots with boundary/interior leftovers, then random points.
+    if len(w) < n:
+        leftovers = np.vstack([dense_other, sparse]) if len(dense_other) > 0 else sparse
+        if len(leftovers) > 0:
+            take = min(n - len(w), len(leftovers))
+            idx = rng.choice(len(leftovers), size=take, replace=False)
+            w = np.vstack([w, leftovers[idx]])
+    while len(w) < n:
+        extra = rng.random((1, 3))
         extra = extra / np.sum(extra, axis=1, keepdims=True)
-        ws.extend(extra.tolist())
+        w = np.vstack([w, extra])
 
-    w = np.array(ws, dtype=np.float64)
-    w = np.clip(w, 1e-6, None)
+    # exact de-dup before truncation
+    _, uniq_idx = np.unique(np.round(w, 12), axis=0, return_index=True)
+    w = w[np.sort(uniq_idx)]
+    if len(w) > n:
+        rng.shuffle(w)
+        w = w[:n]
+    elif len(w) < n:
+        extra = rng.random((n - len(w), 3))
+        extra = extra / np.sum(extra, axis=1, keepdims=True)
+        w = np.vstack([w, extra])
+
+    w = np.clip(w.astype(np.float64), 1e-6, None)
     w = w / np.sum(w, axis=1, keepdims=True)
     return w
 
@@ -179,44 +234,188 @@ class Individual:
 
 
 class Archive:
-    """
-    非支配解集（简单维护 + 简单截断）
+    """Pareto archive with diversity-aware truncation.
+
+    Notes
+    -----
+    - Dominance maintenance is still exact.
+    - When the archive exceeds ``max_size``, truncation is *not* a plain kNN
+      sparsity filter anymore. We first protect objective extremes, then prefer
+      one representative per objective-space grid cell, and only then fill the
+      remaining slots by a density-aware score. This makes the returned archive
+      much more evenly spread on the Pareto front.
     """
 
-    def __init__(self, max_size: int = 200):
-        self.max_size = int(max_size)
+    def __init__(
+        self,
+        max_size: int = 200,
+        *,
+        grid_bins: int = 0,
+        protect_extremes: bool = True,
+        crowd_k: int = 5,
+    ):
+        self.max_size = None if int(max_size) <= 0 else int(max_size)
+        self.grid_bins = int(grid_bins)
+        self.protect_extremes = bool(protect_extremes)
+        self.crowd_k = int(max(1, crowd_k))
         self.items: List[Individual] = []
+        self._objs = np.empty((0, 3), dtype=np.float64)
+        self._keys: set[tuple[float, float, float]] = set()
+
+    @staticmethod
+    def _obj_key(obj: np.ndarray) -> tuple[float, float, float]:
+        arr = np.asarray(obj, dtype=np.float64)
+        return (round(float(arr[0]), 12), round(float(arr[1]), 12), round(float(arr[2]), 12))
 
     def add(self, ind: Individual):
-        # 去重：避免目标向量完全相同导致 archive “挤满一堆重复点”
-        for it in self.items:
-            if np.allclose(it.er.obj, ind.er.obj, rtol=0.0, atol=1e-9):
-                return
-        new_items = []
-        dominated = False
-        for it in self.items:
-            if dominates(it.er.obj, ind.er.obj):
-                dominated = True
-                break
-            if not dominates(ind.er.obj, it.er.obj):
-                new_items.append(it)
-        if dominated:
+        obj = np.asarray(ind.er.obj, dtype=np.float64)
+        key = self._obj_key(obj)
+        if key in self._keys:
             return
-        new_items.append(ind)
-        self.items = new_items
-        if len(self.items) > self.max_size:
+        n = len(self.items)
+        if n == 0:
+            self.items = [ind]
+            self._objs = obj[None, :].copy()
+            self._keys.add(key)
+            return
+
+        f1 = self._objs[:, 0]
+        left = int(np.searchsorted(f1, obj[0], side="right"))
+        right = int(np.searchsorted(f1, obj[0], side="left"))
+
+        # only prefix [0:left) can dominate the candidate because domination
+        # requires existing f1 <= obj[0].
+        if left > 0:
+            pref = self._objs[:left]
+            dom_mask = np.all(pref <= obj[None, :], axis=1) & np.any(pref < obj[None, :], axis=1)
+            if np.any(dom_mask):
+                return
+
+        # only suffix [right:n) can be dominated by the candidate because
+        # candidate domination requires obj[0] <= existing f1.
+        keep_mask = np.ones(n, dtype=bool)
+        if right < n:
+            suff = self._objs[right:]
+            dominated_mask = np.all(obj[None, :] <= suff, axis=1) & np.any(obj[None, :] < suff, axis=1)
+            if np.any(dominated_mask):
+                keep_mask[right:] = ~dominated_mask
+
+        if not np.all(keep_mask):
+            self.items = [it for it, keep in zip(self.items, keep_mask) if keep]
+            removed_keys = {self._obj_key(o) for o in self._objs[~keep_mask]}
+            self._keys.difference_update(removed_keys)
+            self._objs = self._objs[keep_mask]
+            f1 = self._objs[:, 0]
+
+        pos = int(np.searchsorted(f1, obj[0], side="right"))
+        self.items.insert(pos, ind)
+        self._objs = np.insert(self._objs, pos, obj, axis=0)
+        self._keys.add(key)
+
+        if self.max_size is not None and len(self.items) > self.max_size:
             self._truncate()
 
+    def density(self, obj: np.ndarray, k: int = 5) -> float:
+        if len(self._objs) <= 1:
+            return 0.0
+        F = self._objs
+        mn = np.min(F, axis=0)
+        mx = np.max(F, axis=0)
+        denom = np.maximum(1e-9, mx - mn)
+        q = (np.asarray(obj, dtype=np.float64) - mn) / denom
+        Fn = (F - mn) / denom
+        d = np.linalg.norm(Fn - q[None, :], axis=1)
+        d = np.sort(d)
+        kk = min(max(1, int(k)), len(d) - 1)
+        return float(1.0 / max(1e-9, d[kk]))
+
     def _truncate(self):
-        F = np.array([it.er.obj for it in self.items], dtype=np.float64)
+        if self.max_size is None or len(self.items) <= self.max_size:
+            return
+        F = self._objs.astype(np.float64)
+        n, m = F.shape
         mn = F.min(axis=0)
         mx = F.max(axis=0)
         denom = np.maximum(1e-9, mx - mn)
         Fn = (F - mn) / denom
-        center = Fn.mean(axis=0)
-        d = np.linalg.norm(Fn - center, axis=1)
-        keep = np.argsort(-d)[: self.max_size]
+
+        dist = np.linalg.norm(Fn[:, None, :] - Fn[None, :, :], axis=2)
+        np.fill_diagonal(dist, np.inf)
+        k = min(max(1, int(self.crowd_k)), max(1, n - 1))
+        knn = np.partition(dist, kth=k - 1, axis=1)[:, :k]
+        mean_knn = np.mean(knn, axis=1)  # larger = sparser
+
+        bins = self.grid_bins if self.grid_bins > 1 else max(4, int(np.ceil((self.max_size * 2.0) ** (1.0 / max(1, m)))))
+        coords = np.floor(Fn * bins).astype(np.int32)
+        coords = np.clip(coords, 0, bins - 1)
+        cell_keys = [tuple(int(v) for v in row) for row in coords]
+
+        cell_to_indices: dict[tuple[int, ...], list[int]] = {}
+        for i, ck in enumerate(cell_keys):
+            cell_to_indices.setdefault(ck, []).append(i)
+        cell_occ = np.array([len(cell_to_indices[ck]) for ck in cell_keys], dtype=np.float64)
+        density_score = mean_knn / np.maximum(1.0, cell_occ)
+
+        protected: list[int] = []
+        if self.protect_extremes:
+            for j in range(m):
+                protected.append(int(np.argmin(F[:, j])))
+        protected = sorted(set(protected))
+
+        keep_set: set[int] = set(protected)
+
+        # Stage 1: keep at most one representative per occupied cell.
+        reps: list[int] = []
+        for ck, idxs in cell_to_indices.items():
+            center = (np.asarray(ck, dtype=np.float64) + 0.5) / float(bins)
+            best = max(
+                idxs,
+                key=lambda i: (density_score[i], -float(np.linalg.norm(Fn[i] - center))),
+            )
+            reps.append(int(best))
+        reps = sorted(set(reps), key=lambda i: (-density_score[i], int(cell_occ[i]), i))
+        for i in reps:
+            if len(keep_set) >= self.max_size:
+                break
+            keep_set.add(int(i))
+
+        # Stage 2: round-robin fill, prioritizing cells that are still under-represented.
+        if len(keep_set) < self.max_size:
+            per_cell_sorted: dict[tuple[int, ...], list[int]] = {
+                ck: sorted(idxs, key=lambda i: (-density_score[i], i)) for ck, idxs in cell_to_indices.items()
+            }
+            selected_per_cell = {ck: 0 for ck in cell_to_indices}
+            for i in keep_set:
+                selected_per_cell[cell_keys[i]] += 1
+
+            made_progress = True
+            while len(keep_set) < self.max_size and made_progress:
+                made_progress = False
+                cell_order = sorted(
+                    cell_to_indices.keys(),
+                    key=lambda ck: (selected_per_cell[ck] / max(1, len(cell_to_indices[ck])), selected_per_cell[ck], -len(cell_to_indices[ck])),
+                )
+                for ck in cell_order:
+                    for i in per_cell_sorted[ck]:
+                        if i in keep_set:
+                            continue
+                        keep_set.add(int(i))
+                        selected_per_cell[ck] += 1
+                        made_progress = True
+                        break
+                    if len(keep_set) >= self.max_size:
+                        break
+
+        keep = np.array(sorted(keep_set))
+        if len(keep) > self.max_size:
+            unprotected = [i for i in keep if i not in protected]
+            unprotected = sorted(unprotected, key=lambda i: (-density_score[i], i))
+            final_keep = protected + [i for i in unprotected if i not in protected]
+            keep = np.array(sorted(final_keep[: self.max_size]), dtype=np.int64)
+
         self.items = [self.items[i] for i in keep]
+        self._objs = self._objs[keep]
+        self._keys = {self._obj_key(o) for o in self._objs}
 
 
 def _clip_bounds(env: GridEnv, x: np.ndarray) -> np.ndarray:
@@ -291,6 +490,93 @@ def _simplify_polyline_collision_aware(path: np.ndarray, K: int, collision_fn, r
     return p.astype(np.float32)
 
 
+def _path_local_frame(start: np.ndarray, goal: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+    s = np.asarray(start, dtype=np.float32)
+    g = np.asarray(goal, dtype=np.float32)
+    d = (g[:2] - s[:2]).astype(np.float32)
+    L = float(np.linalg.norm(d))
+    if L < 1e-6:
+        u = np.array([1.0, 0.0], dtype=np.float32)
+    else:
+        u = d / L
+    v = np.array([-u[1], u[0]], dtype=np.float32)
+    return u, v, L
+
+
+def _build_stratified_candidate(
+    env: GridEnv,
+    start: np.ndarray,
+    goal: np.ndarray,
+    K: int,
+    rng: np.random.Generator,
+    *,
+    lateral_frac: float = 0.30,
+    n_bands: int = 5,
+    progress_jitter: float = 0.08,
+    global_mix_prob: float = 0.10,
+) -> np.ndarray:
+    """Structured-random initialization with coverage along the start-goal corridor.
+
+    The path is sampled layer-by-layer along the main axis from start to goal.
+    Inside each layer, a lateral band is chosen and then jittered locally.
+    This keeps randomness while preventing all initial paths from collapsing to
+    the same corridor.
+    """
+    start = np.asarray(start, dtype=np.float32)
+    goal = np.asarray(goal, dtype=np.float32)
+    x = np.linspace(start, goal, int(K)).astype(np.float32)
+    if K <= 2:
+        return x
+
+    u, v, L = _path_local_frame(start, goal)
+    lateral_range = max(float(env.resolution) * 4.0, float(L) * float(lateral_frac))
+    n_bands = int(max(3, n_bands))
+    band_edges = np.linspace(-lateral_range, lateral_range, n_bands + 1)
+    base_t = np.linspace(0.0, 1.0, K)
+    center_band = (n_bands - 1) / 2.0
+
+    for i in range(1, K - 1):
+        t0 = float(base_t[i])
+        t = float(np.clip(t0 + rng.uniform(-progress_jitter, progress_jitter), 0.02, 0.98))
+        if rng.random() < float(global_mix_prob):
+            # retain a few purely exploratory samples
+            cand_xy = np.array([
+                rng.uniform(0.0, env.W - 1.0),
+                rng.uniform(0.0, env.H - 1.0),
+            ], dtype=np.float32)
+        else:
+            # use a permuted band order so different individuals emphasize different corridors
+            frac = i / max(1, K - 1)
+            preferred = (frac - 0.5) * 0.8
+            band_shift = int(np.round(preferred * center_band))
+            band_center_idx = int(np.clip(np.round(center_band + band_shift), 0, n_bands - 1))
+            band_candidates = list(range(n_bands))
+            rng.shuffle(band_candidates)
+            if band_center_idx in band_candidates:
+                band_candidates.remove(band_center_idx)
+                band_candidates.insert(0, band_center_idx)
+            chosen = band_candidates[0]
+            d = float(rng.uniform(band_edges[chosen], band_edges[chosen + 1]))
+            center = start[:2] + t * (goal[:2] - start[:2])
+            tangential_jitter = float(rng.normal(0.0, 0.04 * L))
+            cand_xy = (center + tangential_jitter * u + d * v).astype(np.float32)
+
+        if x.shape[1] >= 3:
+            base_z = env.min_safe_altitude_at(float(cand_xy[0]), float(cand_xy[1]), clearance=env.min_clearance + 2.0)
+            z = max(base_z, float(start[2] + t * (goal[2] - start[2]) + rng.normal(1.0, 1.5)))
+            x[i] = np.array([cand_xy[0], cand_xy[1], z], dtype=np.float32)
+        else:
+            x[i, :2] = cand_xy
+
+    x = _clip_bounds(env, x)
+    x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+    x = _repair_segment_clearance(env, x, step=0.5, clearance_margin=2.0)
+    x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+    x[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
+    x[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
+    return x.astype(np.float32)
+
+
 def make_initial_population(
     env: GridEnv,
     start: np.ndarray,
@@ -305,6 +591,11 @@ def make_initial_population(
     astar_max_paths: int = 1,
     astar_penalty_step: float = 2.5,
     astar_max_expansions: Optional[int] = None,
+    stratified_ratio: float = 0.60,
+    stratified_lateral_frac: float = 0.30,
+    stratified_n_bands: int = 5,
+    stratified_progress_jitter: float = 0.08,
+    global_random_ratio: float = 0.15,
     eval_sample_step: float = 0.75,
     smooth_collision_step: float = 0.75,
 ) -> List[Individual]:
@@ -312,9 +603,10 @@ def make_initial_population(
 
     Strategy:
       1) Use A* to obtain one (or a few) feasible backbone paths on the grid.
-      2) Create a portion of the population by jittering around the A* backbone,
-         so MOEA/D starts with more feasible individuals (helps narrow valleys / saddles).
-      3) Fill the rest with noisy straight-line polylines (original behavior).
+      2) Create a portion of the population by jittering around the A* backbone.
+      3) Fill most of the remaining population with stratified corridor sampling
+         (structured randomness with better coverage than pure Gaussian noise).
+      4) Reserve a small tail for fully exploratory random paths.
     """
 
     rng = np.random.default_rng(seed)
@@ -323,6 +615,15 @@ def make_initial_population(
     pop = int(pop)
     K = int(K)
     n_astar = int(np.clip(round(pop * float(astar_ratio)), 0, pop))
+    remaining_after_astar = max(0, pop - n_astar)
+    n_stratified = int(np.clip(round(pop * float(stratified_ratio)), 0, remaining_after_astar))
+    n_global_random = max(0, remaining_after_astar - n_stratified)
+    # optionally keep a larger exploratory tail when requested
+    requested_random = int(np.clip(round(pop * float(global_random_ratio)), 0, remaining_after_astar))
+    if requested_random > n_global_random:
+        take = min(requested_random - n_global_random, n_stratified)
+        n_stratified -= take
+        n_global_random += take
 
     # --- 1) Try to get multiple diverse A* path(s) as feasible backbones ---
     astar_paths: List[np.ndarray] = []
@@ -476,13 +777,30 @@ def make_initial_population(
             er = evaluate_path(env, x, sample_step=eval_sample_step)
             init.append(Individual(x=x, er=er))
 
-    # --- 3) Fill the rest (noisy straight line) ---
+    # --- 3) Stratified corridor sampling: random but more spatially uniform ---
+    for _ in range(n_stratified):
+        x = _build_stratified_candidate(
+            env,
+            start,
+            goal,
+            K,
+            rng,
+            lateral_frac=float(stratified_lateral_frac),
+            n_bands=int(stratified_n_bands),
+            progress_jitter=float(stratified_progress_jitter),
+            global_mix_prob=0.10,
+        )
+        x = repair_light(env, x, rng, tries=6)
+        er = evaluate_path(env, x, sample_step=eval_sample_step)
+        init.append(Individual(x=x, er=er))
+
+    # --- 4) Small exploratory tail: keep some fully random / noisy individuals ---
     while len(init) < pop:
         x = np.linspace(start, goal, K).astype(np.float32)
         noise = rng.normal(0.0, 3.0, size=x.shape).astype(np.float32)
         if x.shape[1] >= 3:
-            noise[:, 0:2] *= 0.65
-            noise[:, 2] *= 0.25
+            noise[:, 0:2] *= 0.85
+            noise[:, 2] *= 0.30
         noise[0] = 0
         noise[-1] = 0
         x = _clip_bounds(env, x + noise)
@@ -495,7 +813,7 @@ def make_initial_population(
         er = evaluate_path(env, x, sample_step=eval_sample_step)
         init.append(Individual(x=x, er=er))
 
-    return init
+    return init[:pop]
 
 
 def crossover(rng: np.random.Generator, p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
@@ -595,6 +913,364 @@ def repair_light(env: GridEnv, x: np.ndarray, rng: np.random.Generator, tries: i
         y = _enforce_altitude_profile(env, y, clearance_margin=1.5, max_pitch_deg=35.0, n_pass=3)
     return y.astype(np.float32)
 
+
+def _best_feasible_obj(pop_inds: List[Individual]) -> Optional[np.ndarray]:
+    feas = [it.er.obj for it in pop_inds if it.er.feasible]
+    if not feas:
+        return None
+    return np.min(np.stack(feas, axis=0), axis=0).astype(np.float64)
+
+
+def _elite_by_obj(pop_inds: List[Individual], obj_idx: int, k: int = 3) -> List[Individual]:
+    feas = [it for it in pop_inds if it.er.feasible]
+    if not feas:
+        cand = sorted(pop_inds, key=lambda it: it.er.violation)
+        return cand[: max(1, k)]
+    feas.sort(key=lambda it: float(it.er.obj[obj_idx]))
+    return feas[: max(1, k)]
+
+
+def _threat_grad(env: GridEnv, x: float, y: float) -> np.ndarray:
+    ix = int(np.clip(round(x), 1, env.W - 2))
+    iy = int(np.clip(round(y), 1, env.H - 2))
+    gx = 0.5 * (float(env.threat[iy, ix + 1]) - float(env.threat[iy, ix - 1]))
+    gy = 0.5 * (float(env.threat[iy + 1, ix]) - float(env.threat[iy - 1, ix]))
+    return np.array([gx, gy], dtype=np.float32)
+
+
+def _objective_local_search(
+    env: GridEnv,
+    base: np.ndarray,
+    obj_idx: int,
+    rng: np.random.Generator,
+    K: int,
+    smooth_tries: int,
+    eval_sample_step: float,
+    max_turn_deg: float,
+    *,
+    mode: str = "exploit",
+) -> np.ndarray:
+    y = np.asarray(base, dtype=np.float32).copy()
+    n = len(y)
+    if n <= 2:
+        return y
+
+    if obj_idx == 0:
+        # f1: shorten path. exploit=gentle shortcut, escape=larger restructuring.
+        if smooth_tries > 0:
+            tries = max(4, int(smooth_tries) * (3 if mode == "escape" else 2))
+            y = shortcut_smooth(y, n_try=tries, rng=rng, collision_fn=lambda p, q: segment_collision(env, p, q, step=0.75))
+            y = densify_polyline_to_K(y, K)
+        avg_rounds = 1 if mode == "exploit" else 3
+        for _ in range(avg_rounds):
+            i = int(rng.integers(1, n - 1))
+            alpha = 0.5 if mode == "exploit" else 0.7
+            y[i] = (1.0 - alpha) * y[i] + 0.5 * alpha * (y[i - 1] + y[i + 1])
+    elif obj_idx == 1:
+        # f2: push hotspot points away from threat gradient / local corridor shift
+        threat_vals = np.array([float(env.threat[int(np.clip(round(p[1]), 0, env.H - 1)), int(np.clip(round(p[0]), 0, env.W - 1))]) for p in y], dtype=np.float32)
+        hotspot_idx = np.argsort(-threat_vals[1:-1])[: max(1, min(3, n - 2))] + 1
+        for i in hotspot_idx:
+            g = _threat_grad(env, float(y[i, 0]), float(y[i, 1]))
+            gn = float(np.linalg.norm(g))
+            if gn < 1e-6:
+                prev = y[i] - y[i - 1]
+                nxt = y[i + 1] - y[i]
+                d = prev[:2] + nxt[:2]
+                dn = float(np.linalg.norm(d))
+                if dn > 1e-6:
+                    side = np.array([-d[1], d[0]], dtype=np.float32) / dn
+                else:
+                    side = rng.normal(0.0, 1.0, size=(2,)).astype(np.float32)
+                    side /= max(1e-6, float(np.linalg.norm(side)))
+                lo, hi = (2.0, 6.0) if mode == "exploit" else (4.0, 10.0)
+                shift = side * float(rng.uniform(lo, hi))
+            else:
+                lo, hi = (2.0, 6.0) if mode == "exploit" else (4.0, 10.0)
+                shift = (-g / gn) * float(rng.uniform(lo, hi))
+            y[i, :2] += shift
+        if n > 6 and rng.random() < (0.35 if mode == "exploit" else 0.75):
+            a = int(rng.integers(1, max(2, n // 3)))
+            b = int(rng.integers(max(a + 1, n // 2), n - 1))
+            alpha = rng.uniform(-0.10, 0.10) if mode == "exploit" else rng.uniform(-0.25, 0.25)
+            seg = y[b, :2] - y[a, :2]
+            seg_n = float(np.linalg.norm(seg))
+            if seg_n > 1e-6:
+                side = np.array([-seg[1], seg[0]], dtype=np.float32) / seg_n
+                y[a:b, :2] += alpha * side * max(env.H, env.W) * 0.05
+    else:
+        # f3: reduce turning / altitude oscillation. escape-mode smooths a wider band.
+        rounds = 2 if mode == "exploit" else 4
+        for _ in range(rounds):
+            i = int(rng.integers(1, n - 1))
+            y[i, :2] = 0.25 * y[i - 1, :2] + 0.5 * y[i, :2] + 0.25 * y[i + 1, :2]
+            if y.shape[1] >= 3:
+                y[i, 2] = 0.25 * y[i - 1, 2] + 0.5 * y[i, 2] + 0.25 * y[i + 1, 2]
+
+    y[0] = base[0]
+    y[-1] = base[-1]
+    y = repair_light(env, y, rng, tries=6)
+    if y.shape[1] >= 3:
+        y = _enforce_altitude_profile(env, y, clearance_margin=1.5, max_pitch_deg=35.0, n_pass=3)
+    return y.astype(np.float32)
+
+
+def _subproblem_density(pop_inds: List[Individual], center_idx: int, k: int = 5) -> float:
+    if len(pop_inds) <= 1:
+        return 0.0
+    feats = np.stack([it.er.obj for it in pop_inds], axis=0).astype(np.float64)
+    mn = np.min(feats, axis=0)
+    mx = np.max(feats, axis=0)
+    denom = np.maximum(1e-9, mx - mn)
+    fn = (feats - mn) / denom
+    q = fn[int(center_idx)]
+    d = np.linalg.norm(fn - q[None, :], axis=1)
+    d = np.sort(d)
+    kk = min(max(1, int(k)), len(d) - 1)
+    return float(1.0 / max(1e-9, d[kk]))
+
+
+def _update_subproblem_utility(
+    pop_inds: List[Individual],
+    W: np.ndarray,
+    z: np.ndarray,
+    utility: np.ndarray,
+    last_g: np.ndarray,
+    stall: np.ndarray,
+    replace_counts: np.ndarray,
+    archive: Archive,
+    *,
+    k_density: int = 5,
+    use_archive_density: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n = len(pop_inds)
+    cur_g = np.empty(n, dtype=np.float64)
+    feats = np.stack([it.er.obj for it in pop_inds], axis=0).astype(np.float64)
+    feas_mask = np.array([it.er.feasible for it in pop_inds], dtype=bool)
+    viol = np.array([float(it.er.violation) for it in pop_inds], dtype=np.float64)
+    cur_g[feas_mask] = np.max(W[feas_mask] * np.abs(feats[feas_mask] - z[None, :]), axis=1)
+    cur_g[~feas_mask] = 1e12 + viol[~feas_mask]
+
+    if n <= 1:
+        density = np.zeros(n, dtype=np.float64)
+    else:
+        mn = np.min(feats, axis=0)
+        mx = np.max(feats, axis=0)
+        denom = np.maximum(1e-9, mx - mn)
+        fn = (feats - mn) / denom
+        diff = fn[:, None, :] - fn[None, :, :]
+        dist = np.linalg.norm(diff, axis=2)
+        np.fill_diagonal(dist, np.inf)
+        kk = min(max(1, int(k_density)), n - 1)
+        kth = np.partition(dist, kk - 1, axis=1)[:, kk - 1]
+        density = 1.0 / np.maximum(1e-9, kth)
+
+    if use_archive_density and archive.items:
+        for i in np.flatnonzero(feas_mask):
+            density[i] = 0.5 * density[i] + 0.5 * archive.density(feats[i], k=k_density)
+
+    improve = np.maximum(0.0, last_g - cur_g)
+    improved = improve > 1e-12
+    stall = np.where(improved, 0.0, stall + 1.0)
+
+    def _norm(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        mn = float(np.min(x))
+        mx = float(np.max(x))
+        if mx - mn < 1e-12:
+            return np.zeros_like(x)
+        return (x - mn) / (mx - mn)
+
+    u = (
+        0.42 * _norm(improve)
+        + 0.26 * _norm(replace_counts)
+        + 0.20 * (1.0 - _norm(density))
+        + 0.20 * utility
+        - 0.18 * _norm(stall)
+    )
+    u = np.clip(u + 1e-6, 1e-6, None)
+    return u, cur_g, stall
+
+
+def _current_subproblem_scalar_values(pop_inds: List[Individual], W: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Current per-subproblem scalar objective used by MOEA/D and MTOE.
+
+    Feasible individuals use Tchebycheff scalarization; infeasible individuals
+    receive a large penalty plus constraint violation, consistent with the rest
+    of this implementation.
+    """
+    n = len(pop_inds)
+    cur_g = np.empty(n, dtype=np.float64)
+    feats = np.stack([it.er.obj for it in pop_inds], axis=0).astype(np.float64)
+    feas_mask = np.array([it.er.feasible for it in pop_inds], dtype=bool)
+    viol = np.array([float(it.er.violation) for it in pop_inds], dtype=np.float64)
+    if np.any(feas_mask):
+        cur_g[feas_mask] = np.max(W[feas_mask] * np.abs(feats[feas_mask] - z[None, :]), axis=1)
+    if np.any(~feas_mask):
+        cur_g[~feas_mask] = 1e12 + viol[~feas_mask]
+    return cur_g
+
+
+def _mtoe_stop_decision(
+    mtoe_hist: deque[float],
+    *,
+    tol_fun: float,
+    confidence: float,
+) -> tuple[bool, Optional[dict]]:
+    """Return whether MTOE early stopping should trigger.
+
+    Paper logic: over the last γ generations, compute the sample variance of the
+    MTOE sequence and use a χ² test to check whether the underlying standard
+    deviation is below ``Tol_fun``. Here ``chi2.sf`` gives the support
+    probability for the hypothesis ``std(MTOE) <= Tol_fun``.
+
+    Practical safeguard: variance alone can be misleading when the sequence is
+    almost constant but still clearly non-zero (for example, a steady stream of
+    similar improvements). Therefore we additionally require the window mean to
+    be no larger than ``Tol_fun`` before declaring stagnation.
+    """
+    gamma = int(len(mtoe_hist))
+    if gamma < 2:
+        return False, None
+
+    vals = np.asarray(mtoe_hist, dtype=np.float64)
+    tol_fun = float(max(1e-12, tol_fun))
+    confidence = float(np.clip(confidence, 0.0, 0.999999999))
+    df = gamma - 1
+    var = float(np.var(vals, ddof=1))
+    std = float(np.sqrt(max(0.0, var)))
+    stat = float(var * df / (tol_fun ** 2))
+    p_support = float(chi2.sf(stat, df))
+    critical_stat = float(chi2.isf(confidence, df))
+    mean_guard = bool(float(np.mean(vals)) <= tol_fun)
+    legacy_stop = bool(p_support >= confidence)
+    stop = bool(legacy_stop and mean_guard)
+    return stop, {
+        "gamma": gamma,
+        "variance": var,
+        "window_std": std,
+        "stat": stat,
+        "critical_stat": critical_stat,
+        "p_support": p_support,
+        "tol_fun": tol_fun,
+        "confidence": confidence,
+        "mean_guard": mean_guard,
+        "legacy_stop_without_mean_guard": legacy_stop,
+        "mtoe": float(vals[-1]),
+        "window_min": float(np.min(vals)),
+        "window_max": float(np.max(vals)),
+        "window_mean": float(np.mean(vals)),
+    }
+
+
+def _sample_active_subproblems(rng: np.random.Generator, utility: np.ndarray, n_select: int, phase: float) -> np.ndarray:
+    n = len(utility)
+    n_select = int(max(1, n_select))
+    base = np.asarray(utility, dtype=np.float64).copy()
+    if n <= n_select:
+        return np.arange(n, dtype=np.int32)
+    # early phase: flatter distribution for exploration; later phase: sharper focus
+    tau = float(np.clip(1.15 - 0.75 * phase, 0.35, 1.15))
+    probs = np.power(np.maximum(base, 1e-6), 1.0 / tau)
+    probs /= np.sum(probs)
+    core = int(min(n, max(1, round(0.75 * n_select))))
+    idx_core = rng.choice(n, size=core, replace=False, p=probs)
+    # keep some deterministic high-utility subproblems every generation
+    remain = n_select - core
+    if remain > 0:
+        elite = np.argsort(-utility)[: min(remain, n)]
+        idx = np.unique(np.concatenate([idx_core, elite])).astype(np.int32)
+        if len(idx) < n_select:
+            avail = np.setdiff1d(np.arange(n, dtype=np.int32), idx, assume_unique=False)
+            extra = rng.choice(avail, size=n_select - len(idx), replace=False)
+            idx = np.concatenate([idx, extra]).astype(np.int32)
+        return idx[:n_select]
+    return idx_core.astype(np.int32)
+
+
+def _allocate_extreme_budget(
+    total_extra: int,
+    best_hist: List[deque],
+    ls_success_ema: np.ndarray,
+    ls_improve_ema: np.ndarray,
+    min_per_obj: int = 1,
+    max_frac_per_obj: float = 0.70,
+) -> np.ndarray:
+    if total_extra <= 0:
+        return np.zeros(3, dtype=np.int32)
+    scores = np.zeros(3, dtype=np.float64)
+    for m in range(3):
+        recent_gain = 0.0
+        hist = list(best_hist[m])
+        if len(hist) >= 2:
+            recent_gain = max(0.0, float(hist[0] - hist[-1]))
+        scores[m] = 0.55 * recent_gain + 0.25 * float(ls_success_ema[m]) + 0.20 * float(ls_improve_ema[m])
+    scores += 1e-6
+    alloc = np.zeros(3, dtype=np.int32)
+    remaining = int(total_extra)
+    if remaining >= 3 * min_per_obj:
+        alloc[:] = int(min_per_obj)
+        remaining -= int(np.sum(alloc))
+    max_per = max(1, int(np.ceil(float(total_extra) * float(max_frac_per_obj))))
+    if remaining > 0:
+        probs = scores / np.sum(scores)
+        for _ in range(remaining):
+            order = np.argsort(-probs)
+            placed = False
+            for j in order:
+                if alloc[j] < max_per:
+                    alloc[j] += 1
+                    placed = True
+                    break
+            if not placed:
+                alloc[int(order[0])] += 1
+    return alloc
+
+
+
+def _cheap_candidate_precheck(
+    env: GridEnv,
+    child: np.ndarray,
+    parent: Optional[np.ndarray] = None,
+    *,
+    threat_mean: Optional[float] = None,
+    threat_std: Optional[float] = None,
+) -> bool:
+    """Fast reject rules before expensive evaluation.
+
+    Return True when the child is *worth* a full evaluation.
+    """
+    y = np.asarray(child, dtype=np.float32)
+    if len(y) <= 1:
+        return False
+    seg = y[1:] - y[:-1]
+    seglen = np.linalg.norm(seg[:, :2], axis=1)
+    if np.any(seglen < 1e-3):
+        return False
+    # absurdly long zig-zag offspring are usually wasted evaluations.
+    path_len = float(np.sum(np.linalg.norm(seg, axis=1)))
+    chord = float(np.linalg.norm(y[-1] - y[0]))
+    if path_len > max(50.0, 4.0 * chord):
+        return False
+    if parent is not None:
+        p = np.asarray(parent, dtype=np.float32)
+        if p.shape == y.shape and float(np.mean(np.linalg.norm(y - p, axis=1))) < 0.15:
+            return False
+    threat_samples = []
+    for p in y[1:-1:max(1, len(y)//6)]:
+        ix = int(np.clip(round(float(p[0])), 0, env.W - 1))
+        iy = int(np.clip(round(float(p[1])), 0, env.H - 1))
+        threat_samples.append(float(env.threat[iy, ix]))
+    if threat_samples:
+        if threat_mean is None:
+            threat_mean = float(np.mean(env.threat))
+        if threat_std is None:
+            threat_std = float(np.std(env.threat))
+        if np.mean(threat_samples) > float(threat_mean + 2.5 * threat_std):
+            return False
+    return True
+
+
 def better_feasible(a: EvalResult, b: EvalResult) -> bool:
     """
     可行解优先：
@@ -621,7 +1297,10 @@ def moead(
     T: int = 10,
     seed: int = 0,
     max_turn_deg: float = 90.0,
-    archive_size: int = 200,
+    archive_size: int = 0,
+    archive_soft_limit: int = 320,
+    archive_grid_bins: int = 0,
+    archive_keep_extremes: bool = True,
     smooth_tries: int = 8,
     # --- evaluation & smoothing sampling step ---
     eval_sample_step: float = 0.5,
@@ -638,6 +1317,27 @@ def moead(
     init_astar_max_paths: int = 5,
     init_astar_penalty_step: float = 2.5,
     init_astar_max_expansions: Optional[int] = None,
+    init_stratified_ratio: float = 0.60,
+    init_stratified_lateral_frac: float = 0.30,
+    init_stratified_n_bands: int = 5,
+    init_stratified_progress_jitter: float = 0.08,
+    init_global_random_ratio: float = 0.15,
+    weight_extreme_bias: float = 0.20,
+    extreme_offspring_ratio: float = 0.20,
+    extreme_potential_window: int = 20,
+    extreme_min_extra_per_obj: int = 1,
+    extreme_max_frac_per_obj: float = 0.70,
+    local_search_interval: int = 10,
+    local_search_elite_k: int = 3,
+    local_search_attempts_per_obj: int = 2,
+    active_subproblem_ratio: float = 1.0,
+    utility_update_interval: int = 3,
+    utility_use_archive_density: bool = False,
+    log_flush_every: int = 10,
+    moead_min_gen: int = 20,
+    moead_max_gen: Optional[int] = None,
+    mtoe_tol_fun: float = 1e-5,
+    mtoe_confidence: float = 0.99,
 ):
     """
     MOEA/D（Tchebycheff 标量化 + 外部档案）
@@ -659,8 +1359,18 @@ def moead(
     debug_level = int(debug_level)
     eval_sample_step = float(eval_sample_step)
     smooth_collision_step = float(smooth_collision_step)
+    utility_update_interval = int(max(1, utility_update_interval))
+    log_flush_every = int(max(1, log_flush_every))
+    moead_min_gen = int(max(1, moead_min_gen))
+    moead_max_gen = int(n_gen if moead_max_gen is None else max(1, moead_max_gen))
+    if moead_max_gen < moead_min_gen:
+        moead_max_gen = moead_min_gen
+    mtoe_tol_fun = float(max(1e-12, mtoe_tol_fun))
+    mtoe_confidence = float(np.clip(mtoe_confidence, 0.0, 0.999999999))
+    threat_mean = float(np.mean(env.threat))
+    threat_std = float(np.std(env.threat))
     M = 3
-    W = uniform_weights(M, pop, seed=seed)
+    W = uniform_weights(M, pop, seed=seed, extreme_bias=float(weight_extreme_bias))
     B = build_neighbors(W, T=T)
 
     t_init0 = time.perf_counter()
@@ -677,11 +1387,22 @@ def moead(
         astar_max_paths=int(init_astar_max_paths),
         astar_penalty_step=float(init_astar_penalty_step),
         astar_max_expansions=init_astar_max_expansions,
+        stratified_ratio=float(init_stratified_ratio),
+        stratified_lateral_frac=float(init_stratified_lateral_frac),
+        stratified_n_bands=int(init_stratified_n_bands),
+        stratified_progress_jitter=float(init_stratified_progress_jitter),
+        global_random_ratio=float(init_global_random_ratio),
         eval_sample_step=eval_sample_step,
         smooth_collision_step=smooth_collision_step,
     )
     init_s = time.perf_counter() - t_init0
-    archive = Archive(max_size=archive_size)
+    effective_archive_size = int(archive_size) if int(archive_size) > 0 else int(archive_soft_limit)
+    archive = Archive(
+        max_size=effective_archive_size,
+        grid_bins=int(archive_grid_bins),
+        protect_extremes=bool(archive_keep_extremes),
+        crowd_k=5,
+    )
 
     # ideal point z*
     # ideal point z*: 建议只由可行解更新（避免不可行解把 z 拉得过小导致标量化失真）
@@ -713,6 +1434,23 @@ def moead(
         return hit
 
     n_eval = 0
+    best_hist = [deque(maxlen=max(2, int(extreme_potential_window))) for _ in range(3)]
+    init_best = _best_feasible_obj(pop_inds)
+    if init_best is not None:
+        for m in range(3):
+            best_hist[m].append(float(init_best[m]))
+    ls_success_ema = np.zeros(3, dtype=np.float64)
+    ls_improve_ema = np.zeros(3, dtype=np.float64)
+    utility = np.ones(pop, dtype=np.float64)
+    utility_last_g = _current_subproblem_scalar_values(pop_inds, W, z)
+    mtoe_best_g = utility_last_g.copy()
+    prev_z_mtoe = z.copy()
+    stall = np.zeros(pop, dtype=np.float64)
+    replace_counts = np.zeros(pop, dtype=np.float64)
+
+    mtoe_window = 10
+    mtoe_debug_tail: deque[dict] = deque(maxlen=25)
+    mtoe_tests_run = 0
 
     if logger is not None:
         st = _pop_stats(pop_inds)
@@ -720,7 +1458,8 @@ def moead(
             "[start] env(H=%d,W=%d) seed=%d n_gen=%d pop=%d K=%d T=%d max_turn_deg=%.1f "
             "eval_step=%.3f smooth_step=%.3f init_s=%.3f init_feasible=%d/%d (%.1f%%) "
             "init_min_viol=%.3f init_mean_viol=%.3f init_archive=%d "
-            "A* seeding: ratio=%.3f max_paths=%d penalty_step=%.3f threat_w=%.3f jitter=%.3f",
+            "A* seeding: ratio=%.3f max_paths=%d penalty_step=%.3f threat_w=%.3f jitter=%.3f | "
+            "stratified: ratio=%.3f lateral_frac=%.3f bands=%d progress_jitter=%.3f global_random=%.3f | weight_extreme_bias=%.3f | extra_ratio=%.3f potential_W=%d ls_interval=%d ls_elite=%d ls_attempts=%d active_ratio=%.3f utility_update_interval=%d utility_archive_density=%s log_flush_every=%d archive_cap=%s | MTOE(mode=best_so_far_delta window=%d min_gen=%d max_gen=%d tol_fun=%.3e confidence=%.4f)",
             int(env.H),
             int(env.W),
             int(seed),
@@ -743,9 +1482,35 @@ def moead(
             float(init_astar_penalty_step),
             float(init_astar_threat_weight),
             float(init_astar_jitter_sigma),
+            float(init_stratified_ratio),
+            float(init_stratified_lateral_frac),
+            int(init_stratified_n_bands),
+            float(init_stratified_progress_jitter),
+            float(init_global_random_ratio),
+            float(weight_extreme_bias),
+            float(extreme_offspring_ratio),
+            int(extreme_potential_window),
+            int(local_search_interval),
+            int(local_search_elite_k),
+            int(local_search_attempts_per_obj),
+            float(active_subproblem_ratio),
+            int(utility_update_interval),
+            str(bool(utility_use_archive_density)),
+            int(log_flush_every),
+            str("unbounded" if archive.max_size is None else archive.max_size),
+            int(mtoe_window),
+            int(moead_min_gen),
+            int(moead_max_gen),
+            float(mtoe_tol_fun),
+            float(mtoe_confidence),
         )
 
-    for gen in range(int(n_gen)):
+    mtoe_hist: deque[float] = deque(maxlen=mtoe_window)
+    stop_reason = "max_gen"
+    stop_info = None
+    actual_gens = 0
+
+    for gen in range(int(moead_max_gen)):
         gen_t0 = time.perf_counter()
         gen_eval_s = 0.0
         gen_smooth_s = 0.0
@@ -755,80 +1520,199 @@ def moead(
         gen_n_smooth_out = 0
         gen_coll_calls0 = coll_calls
         gen_coll_time0 = coll_time_s
+        gen_extreme_alloc = np.zeros(3, dtype=np.int32)
+        gen_ls_success = np.zeros(3, dtype=np.int32)
+        gen_ls_attempts = np.zeros(3, dtype=np.int32)
 
-        for i in range(pop):
-            # 从邻域选择两个父代
+        def _update_neighbors_for_child(child: np.ndarray, er_child: EvalResult, center_idx: int):
+            nonlocal z, gen_neighbor_s, replace_counts
+            if er_child.feasible:
+                z = np.minimum(z, er_child.obj)
+            t_n0 = time.perf_counter()
+            nb = B[int(center_idx)]
+            local_repl = 0
+            for j in nb:
+                jj = int(j)
+                cur = pop_inds[jj]
+                replaced = False
+                if er_child.feasible and (not cur.er.feasible):
+                    pop_inds[jj] = Individual(x=child, er=er_child)
+                    replaced = True
+                elif (not er_child.feasible) and cur.er.feasible:
+                    replaced = False
+                elif (not er_child.feasible) and (not cur.er.feasible):
+                    if er_child.violation < cur.er.violation:
+                        pop_inds[jj] = Individual(x=child, er=er_child)
+                        replaced = True
+                else:
+                    g_child = tchebycheff(er_child.obj, W[jj], z)
+                    g_cur = tchebycheff(cur.er.obj, W[jj], z)
+                    if g_child <= g_cur:
+                        pop_inds[jj] = Individual(x=child, er=er_child)
+                        replaced = True
+                if replaced:
+                    local_repl += 1
+                    replace_counts[jj] += 1.0
+            gen_neighbor_s += (time.perf_counter() - t_n0)
+            if er_child.feasible:
+                archive.add(Individual(x=child, er=er_child))
+            return local_repl
+
+        # subproblem-level utility update + active subproblem sampling
+        phase = float(gen) / max(1.0, float(n_gen - 1))
+        if gen == 0 or (gen % utility_update_interval) == 0:
+            utility, utility_last_g, stall = _update_subproblem_utility(
+                pop_inds,
+                W,
+                z,
+                utility,
+                utility_last_g,
+                stall,
+                replace_counts,
+                archive,
+                use_archive_density=bool(utility_use_archive_density),
+            )
+            replace_counts *= 0.65
+        else:
+            replace_counts *= 0.80
+        active_n = int(np.clip(round(float(active_subproblem_ratio) * float(pop)), 1, pop))
+        if phase < 0.20:
+            active_n = pop
+        elif phase > 0.75:
+            active_n = max(1, min(pop, int(round(0.70 * active_n))))
+        active_idx = _sample_active_subproblems(rng, utility, n_select=active_n, phase=phase)
+        utility_med = float(np.median(utility))
+        stall_med = float(np.median(stall))
+        stall_p60 = float(np.percentile(stall, 60))
+        stall_p75 = float(np.percentile(stall, 75))
+
+        # regular MOEA/D offspring, now focused on active subproblems
+        for i in active_idx:
+            i = int(i)
             nb = B[i]
             pidx = rng.choice(nb, size=2, replace=False)
             p1 = pop_inds[int(pidx[0])].x
             p2 = pop_inds[int(pidx[1])].x
 
             child = crossover(rng, p1, p2)
-            child = mutate(rng, child, sigma=2.5, p_mut=0.25)
+            sigma = 2.0 if utility[i] >= utility_med else 3.2
+            p_mut = 0.20 if stall[i] <= stall_med else 0.35
+            child = mutate(rng, child, sigma=sigma, p_mut=p_mut)
             t_r0 = time.perf_counter()
-            child = repair_light(env, child, rng, tries=6)
+            child = repair_light(env, child, rng, tries=5 if utility[i] >= utility_med else 7)
             gen_repair_s += (time.perf_counter() - t_r0)
 
-            # 可选：轻量捷径平滑（提升质量，但会增加评估耗时）
-            do_smooth = (smooth_tries > 0) and ((i + gen) % 2 == 0)
+            do_smooth = (smooth_tries > 0) and ((i + gen) % 2 == 0) and (stall[i] <= stall_p75)
             if do_smooth:
                 gen_n_smooth_in += int(len(child))
                 t_s0 = time.perf_counter()
                 child = shortcut_smooth(child, n_try=smooth_tries, rng=rng, collision_fn=collision_fn)
                 gen_smooth_s += (time.perf_counter() - t_s0)
                 gen_n_smooth_out += int(len(child))
-
-                # 平滑后点数可能变少，补回固定 K：保留拐点的按段插点，避免切角导致碰撞
                 child = densify_polyline_to_K(child, K)
 
             child[0] = start
             child[-1] = goal
+            if not _cheap_candidate_precheck(env, child, parent=p1, threat_mean=threat_mean, threat_std=threat_std):
+                continue
 
             t_e0 = time.perf_counter()
             er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
             gen_eval_s += (time.perf_counter() - t_e0)
             n_eval += 1
+            _update_neighbors_for_child(child, er_child, i)
 
-            # 更新 ideal point（只对目标值取 min）
-            # 仅用可行解更新 ideal point；不可行解只用于约束比较，不影响 z*
-            if er_child.feasible:
-                z = np.minimum(z, er_child.obj)
+        # extra offspring with dynamic resource allocation across objective extremes
+        total_extra = int(round(float(extreme_offspring_ratio) * float(pop)))
+        if total_extra > 0:
+            gen_extreme_alloc = _allocate_extreme_budget(
+                total_extra,
+                best_hist,
+                ls_success_ema,
+                ls_improve_ema,
+                min_per_obj=int(extreme_min_extra_per_obj),
+                max_frac_per_obj=float(extreme_max_frac_per_obj),
+            )
+            extreme_centers = [int(np.argmax(W[:, m])) for m in range(3)]
+            for m in range(3):
+                for _ in range(int(gen_extreme_alloc[m])):
+                    elites = _elite_by_obj(pop_inds, m, k=max(1, int(local_search_elite_k)))
+                    parent = elites[int(rng.integers(0, len(elites)))]
+                    mode = "exploit" if utility[extreme_centers[m]] >= utility_med else "escape"
+                    child = _objective_local_search(
+                        env,
+                        parent.x,
+                        obj_idx=m,
+                        rng=rng,
+                        K=K,
+                        smooth_tries=smooth_tries,
+                        eval_sample_step=eval_sample_step,
+                        max_turn_deg=max_turn_deg,
+                        mode=mode,
+                    )
+                    child[0] = start
+                    child[-1] = goal
+                    if not _cheap_candidate_precheck(env, child, parent=parent.x, threat_mean=threat_mean, threat_std=threat_std):
+                        continue
+                    t_e0 = time.perf_counter()
+                    er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                    gen_eval_s += (time.perf_counter() - t_e0)
+                    n_eval += 1
+                    _update_neighbors_for_child(child, er_child, extreme_centers[m])
 
-            # 更新邻域解：Deb 可行性规则 + 可行解上的 Tchebycheff 标量化
-            t_n0 = time.perf_counter()
-            for j in nb:
-                jj = int(j)
-                cur = pop_inds[jj]
+        # periodic directed local search on elite solutions
+        if int(local_search_interval) > 0 and (((gen + 1) % int(local_search_interval)) == 0):
+            extreme_centers = [int(np.argmax(W[:, m])) for m in range(3)]
+            for m in range(3):
+                elites = _elite_by_obj(pop_inds, m, k=max(1, int(local_search_elite_k)))
+                for attempt in range(min(int(local_search_attempts_per_obj), len(elites))):
+                    parent = elites[attempt]
+                    base_val = float(parent.er.obj[m]) if parent.er.feasible else None
+                    mode = "exploit" if utility[extreme_centers[m]] >= utility_med and stall[extreme_centers[m]] < stall_p60 else "escape"
+                    child = _objective_local_search(
+                        env,
+                        parent.x,
+                        obj_idx=m,
+                        rng=rng,
+                        K=K,
+                        smooth_tries=smooth_tries,
+                        eval_sample_step=eval_sample_step,
+                        max_turn_deg=max_turn_deg,
+                        mode=mode,
+                    )
+                    child[0] = start
+                    child[-1] = goal
+                    if not _cheap_candidate_precheck(env, child, parent=parent.x, threat_mean=threat_mean, threat_std=threat_std):
+                        continue
+                    t_e0 = time.perf_counter()
+                    er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                    gen_eval_s += (time.perf_counter() - t_e0)
+                    n_eval += 1
+                    gen_ls_attempts[m] += 1
+                    improved = False
+                    if er_child.feasible and parent.er.feasible and float(er_child.obj[m]) + 1e-9 < float(parent.er.obj[m]):
+                        improved = True
+                        gain = max(0.0, float(parent.er.obj[m] - er_child.obj[m]))
+                        ls_improve_ema[m] = 0.8 * ls_improve_ema[m] + 0.2 * gain
+                    elif er_child.feasible and (not parent.er.feasible):
+                        improved = True
+                        ls_improve_ema[m] = 0.8 * ls_improve_ema[m] + 0.2 * 1.0
+                    else:
+                        ls_improve_ema[m] = 0.9 * ls_improve_ema[m]
+                    ls_success_ema[m] = 0.8 * ls_success_ema[m] + 0.2 * (1.0 if improved else 0.0)
+                    if improved:
+                        gen_ls_success[m] += 1
+                    _update_neighbors_for_child(child, er_child, extreme_centers[m])
 
-                # 1) 可行性优先
-                if er_child.feasible and (not cur.er.feasible):
-                    pop_inds[jj] = Individual(x=child, er=er_child)
-                    continue
-                if (not er_child.feasible) and cur.er.feasible:
-                    continue
-
-                # 2) 都不可行：违反程度更小者更优
-                if (not er_child.feasible) and (not cur.er.feasible):
-                    if er_child.violation < cur.er.violation:
-                        pop_inds[jj] = Individual(x=child, er=er_child)
-                    continue
-
-                # 3) 都可行：按 Tchebycheff scalar 比较
-                g_child = tchebycheff(er_child.obj, W[jj], z)
-                g_cur = tchebycheff(cur.er.obj, W[jj], z)
-                if g_child <= g_cur:
-                    pop_inds[jj] = Individual(x=child, er=er_child)
-
-            gen_neighbor_s += (time.perf_counter() - t_n0)
-
-            if er_child.feasible:
-                archive.add(Individual(x=child, er=er_child))
-
+        cur_best = _best_feasible_obj(pop_inds)
+        if cur_best is not None:
+            for m in range(3):
+                best_hist[m].append(float(cur_best[m]))
         # --- per-generation debug ---
         if logger is not None and ((gen % debug_every) == 0 or gen == int(n_gen) - 1):
             st = _pop_stats(pop_inds)
             gen_total_s = time.perf_counter() - gen_t0
-            n_eval_gen = int(pop)
+            n_eval_gen = max(1, int(active_n if "active_n" in locals() else pop))
             avg_eval_ms = 1000.0 * gen_eval_s / max(1, n_eval_gen)
             avg_repair_ms = 1000.0 * gen_repair_s / max(1, n_eval_gen)
             avg_smooth_ms = 1000.0 * gen_smooth_s / max(1, n_eval_gen)
@@ -837,7 +1721,7 @@ def moead(
 
             if debug_level <= 1:
                 logger.info(
-                    "[gen=%d] total=%.3fs archive=%d feasible=%d/%d (%.1f%%) min_viol=%.3f mean_viol=%.3f best_feas=%s",
+                    "[gen=%d] total=%.3fs archive=%d feasible=%d/%d (%.1f%%) min_viol=%.3f mean_viol=%.3f best_feas=%s extra=%s ls=%s",
                     int(gen),
                     float(gen_total_s),
                     int(len(archive.items)),
@@ -847,12 +1731,14 @@ def moead(
                     float(st["min_violation"]),
                     float(st["mean_violation"]),
                     str(best_obj),
+                    gen_extreme_alloc.tolist(),
+                    gen_ls_success.tolist(),
                 )
             else:
                 # Level>=2: add timing breakdown
                 msg = (
                     "[gen=%d] total=%.3fs archive=%d feasible=%d/%d (%.1f%%) "
-                    "eval=%.2fms repair=%.2fms smooth=%.2fms neigh=%.2fms best_feas=%s"
+                    "eval=%.2fms repair=%.2fms smooth=%.2fms neigh=%.2fms best_feas=%s extra=%s ls=%s"
                 )
 
                 if debug_level >= 3:
@@ -886,6 +1772,8 @@ def moead(
                         float(avg_smooth_ms),
                         float(avg_neighbor_ms),
                         str(best_obj),
+                        gen_extreme_alloc.tolist(),
+                        gen_ls_success.tolist(),
                         int(gen_coll_calls),
                         float(gen_coll_time),
                         int(est_cells),
@@ -906,10 +1794,86 @@ def moead(
                         float(avg_smooth_ms),
                         float(avg_neighbor_ms),
                         str(best_obj),
+                        gen_extreme_alloc.tolist(),
+                        gen_ls_success.tolist(),
                     )
 
-        # force flush to disk so logs update in real time
-        if logger is not None:
+        cur_g_raw = _current_subproblem_scalar_values(pop_inds, W, z)
+        cur_g_best = np.minimum(mtoe_best_g, cur_g_raw)
+        toe_vec = np.maximum(0.0, mtoe_best_g - cur_g_best)
+        mtoe_idx = int(np.argmax(toe_vec)) if toe_vec.size > 0 else -1
+        mtoe = float(toe_vec[mtoe_idx]) if mtoe_idx >= 0 else 0.0
+        z_delta = np.abs(z - prev_z_mtoe)
+        nonzero_count = int(np.count_nonzero(toe_vec > 1e-12))
+        mtoe_probe = {
+            "gen": int(gen),
+            "mode": "best_so_far_delta",
+            "idx": int(mtoe_idx),
+            "value": float(mtoe),
+            "delta_count": int(nonzero_count),
+            "delta_mean": float(np.mean(toe_vec)) if toe_vec.size > 0 else 0.0,
+            "delta_p90": float(np.percentile(toe_vec, 90)) if toe_vec.size > 0 else 0.0,
+            "prev_best": float(mtoe_best_g[mtoe_idx]) if mtoe_idx >= 0 else None,
+            "cur_raw": float(cur_g_raw[mtoe_idx]) if mtoe_idx >= 0 else None,
+            "cur_best": float(cur_g_best[mtoe_idx]) if mtoe_idx >= 0 else None,
+            "z_delta_inf": float(np.max(z_delta)) if z_delta.size > 0 else 0.0,
+            "z_delta_l2": float(np.linalg.norm(z_delta)) if z_delta.size > 0 else 0.0,
+        }
+        mtoe_debug_tail.append(mtoe_probe)
+        mtoe_hist.append(mtoe)
+        mtoe_best_g = cur_g_best
+        prev_z_mtoe = z.copy()
+        actual_gens = gen + 1
+
+        if (gen + 1) >= moead_min_gen and len(mtoe_hist) >= mtoe_window:
+            mtoe_tests_run += 1
+            should_stop, mtoe_stats = _mtoe_stop_decision(
+                mtoe_hist,
+                tol_fun=mtoe_tol_fun,
+                confidence=mtoe_confidence,
+            )
+            if mtoe_stats is not None:
+                mtoe_stats["probe"] = dict(mtoe_probe)
+            if logger is not None and ((gen % debug_every) == 0 or gen == int(moead_max_gen) - 1):
+                logger.info(
+                    "[gen=%d][mtoe] value=%.6e idx=%d nonzero=%d mean=%.6e p90=%.6e std=%.6e var=%.6e p_support=%.6f mean_guard=%s tol_fun=%.6e confidence=%.6f z_shift_inf=%.6e window=[%.6e, %.6e]",
+                    int(gen),
+                    float(mtoe_stats["mtoe"]),
+                    int(mtoe_probe["idx"]),
+                    int(mtoe_probe["delta_count"]),
+                    float(mtoe_probe["delta_mean"]),
+                    float(mtoe_probe["delta_p90"]),
+                    float(mtoe_stats["window_std"]),
+                    float(mtoe_stats["variance"]),
+                    float(mtoe_stats["p_support"]),
+                    str(bool(mtoe_stats["mean_guard"])),
+                    float(mtoe_stats["tol_fun"]),
+                    float(mtoe_stats["confidence"]),
+                    float(mtoe_probe["z_delta_inf"]),
+                    float(mtoe_stats["window_min"]),
+                    float(mtoe_stats["window_max"]),
+                )
+            if should_stop:
+                stop_reason = "mtoe"
+                stop_info = mtoe_stats
+                if logger is not None:
+                    logger.info(
+                        "[stop] reason=mtoe gen=%d value=%.6e idx=%d nonzero=%d mean=%.6e std=%.6e p_support=%.6f mean_guard=%s tol_fun=%.6e confidence=%.6f",
+                        int(gen),
+                        float(mtoe_stats["mtoe"]),
+                        int(mtoe_probe["idx"]),
+                        int(mtoe_probe["delta_count"]),
+                        float(mtoe_probe["delta_mean"]),
+                        float(mtoe_stats["window_std"]),
+                        float(mtoe_stats["p_support"]),
+                        str(bool(mtoe_stats["mean_guard"])),
+                        float(mtoe_stats["tol_fun"]),
+                        float(mtoe_stats["confidence"]),
+                    )
+                break
+
+        # periodic flush to disk so logs still update in near real time without flushing every generation
+        if logger is not None and ((((gen + 1) % log_flush_every) == 0) or gen == int(n_gen) - 1):
             for _h in list(logger.handlers):
                 try:
                     _h.flush()
@@ -917,13 +1881,31 @@ def moead(
                     pass
 
 
+    if stop_reason == "max_gen":
+        actual_gens = int(moead_max_gen)
+
     log = {
-        "n_gen": int(n_gen),
+        "n_gen": int(actual_gens),
+        "configured_n_gen": int(moead_max_gen),
+        "requested_n_gen": int(n_gen),
         "pop": int(pop),
         "K": int(K),
         "T": int(T),
         "n_eval": int(n_eval),
         "archive_size": len(archive.items),
+        "max_gen": int(moead_max_gen),
+        "moead_min_gen": int(moead_min_gen),
+        "mtoe_enabled": True,
+        "mtoe_mode": "best_so_far_delta",
+        "mtoe_tol_fun": float(mtoe_tol_fun),
+        "mtoe_confidence": float(mtoe_confidence),
+        "stop_reason": str(stop_reason),
+        "mtoe_window": int(mtoe_window),
+        "mtoe_last": float(mtoe_hist[-1]) if len(mtoe_hist) > 0 else None,
+        "mtoe_history_tail": [float(v) for v in list(mtoe_hist)],
+        "mtoe_debug_tail": [dict(v) for v in list(mtoe_debug_tail)],
+        "mtoe_tests_run": int(mtoe_tests_run),
+        "mtoe_stop": stop_info,
         "ideal_point": z.tolist(),
     }
     return pop_inds, archive, log

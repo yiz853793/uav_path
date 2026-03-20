@@ -5,17 +5,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
-
-# 如果前面有更大的忽略规则，比如 src/ 或 src/*
-# 需要先保留父目录可见
-!src/
-!src/env/
-!src/env/**
+# Virtual environments (repo root only)
+/.venv/
+/venv/
+/ENV/
+/env/
 
 # Local env files (secrets / machine-specific)
 .env
@@ -71,7 +65,7 @@ terrains/
 
 # Common generated artifacts (when running scripts in repo root)
 benchmark_summary.log
-moead_debug.log
+mtoe_debug.log
 *.log
 paths_*.png
 pareto_*.png

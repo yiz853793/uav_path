@@ -8,6 +8,20 @@ from src.algorithms.prm import prm
 from src.algorithms.moead import moead
 from experiments.vis_data import build_vis_payload, save_vis_payload
 
+
+def split_moead_log(log):
+    log = log if isinstance(log, dict) else {}
+    if not log:
+        return {}, {}
+    metric_keys = {
+        "n_gen", "configured_n_gen", "requested_n_gen", "pop", "K", "T", "n_eval",
+        "archive_size", "max_gen", "moead_min_gen", "mtoe_enabled", "mtoe_mode",
+        "mtoe_tol_fun", "mtoe_confidence", "stop_reason", "mtoe_window", "ideal_point",
+    }
+    metric_log = {k: log[k] for k in metric_keys if k in log}
+    debug_log = {k: v for k, v in log.items() if k not in metric_keys}
+    return metric_log, debug_log
+
 def meters_to_cells(env, value_m: float) -> float:
     return float(value_m) / float(env.resolution)
 
@@ -43,15 +57,46 @@ def main():
     ap.add_argument("--prm_k", type=int, default=12)
     ap.add_argument("--prm_max_edge_len", type=float, default=30.0)
     ap.add_argument("--prm_threat_weight", type=float, default=0.0)
-    ap.add_argument("--moead_gen", type=int, default=80)
+    ap.add_argument("--moead_min_gen", type=int, default=20)
+    ap.add_argument("--moead_max_gen", type=int, default=None)
+    ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
+    ap.add_argument("--mtoe_confidence", type=float, default=0.99)
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)
     ap.add_argument("--out_json", type=str, default="", help="where to save visualization json")
+    ap.add_argument("--init_astar_ratio", type=float, default=0.25)
+    ap.add_argument("--init_astar_threat_weight", type=float, default=0.0)
+    ap.add_argument("--init_astar_jitter_sigma", type=float, default=1.5)
+    ap.add_argument("--init_astar_max_paths", type=int, default=5)
+    ap.add_argument("--init_astar_penalty_step", type=float, default=2.5)
+    ap.add_argument("--init_stratified_ratio", type=float, default=0.60)
+    ap.add_argument("--init_stratified_lateral_frac", type=float, default=0.30)
+    ap.add_argument("--init_stratified_n_bands", type=int, default=5)
+    ap.add_argument("--init_stratified_progress_jitter", type=float, default=0.08)
+    ap.add_argument("--init_global_random_ratio", type=float, default=0.15)
+    ap.add_argument("--weight_extreme_bias", type=float, default=0.20)
+    ap.add_argument("--extreme_offspring_ratio", type=float, default=0.20)
+    ap.add_argument("--extreme_potential_window", type=int, default=20)
+    ap.add_argument("--extreme_min_extra_per_obj", type=int, default=1)
+    ap.add_argument("--extreme_max_frac_per_obj", type=float, default=0.60)
+    ap.add_argument("--local_search_interval", type=int, default=10)
+    ap.add_argument("--local_search_elite_k", type=int, default=3)
+    ap.add_argument("--local_search_attempts_per_obj", type=int, default=2)
+    ap.add_argument("--archive_size", type=int, default=0, help="MOEA/D archive upper bound (>0 uses hard cap; <=0 falls back to archive_soft_limit)")
+    ap.add_argument("--archive_soft_limit", type=int, default=320, help="soft archive cap used when archive_size<=0; improves Pareto spread")
+    ap.add_argument("--archive_grid_bins", type=int, default=0, help="objective-space grid bins for diversity-aware archive truncation (0=auto)")
+    ap.add_argument("--archive_keep_extremes", type=int, default=1, help="protect objective extremes during archive truncation (1/0)")
+    ap.add_argument("--active_subproblem_ratio", type=float, default=1.0, help="fraction of subproblems activated each generation (0,1]")
+    ap.add_argument("--utility_update_interval", type=int, default=3, help="update MOEA/D utility every N generations")
+    ap.add_argument("--utility_use_archive_density", type=int, default=0, help="whether to mix archive density into utility update (1/0)")
+    ap.add_argument("--log_flush_every", type=int, default=10, help="flush MOEA/D debug log every N generations")
     ap.add_argument("--start", type=float, nargs=2, default=None, help="start point in meters: x_m y_m")
     ap.add_argument("--goal", type=float, nargs=2, default=None, help="goal point in meters: x_m y_m")
     ap.add_argument("--start_goal_z_offset", type=float, default=2.0, help="default start/goal altitude offset above local ground, in meters")
     args = ap.parse_args()
+    if args.moead_max_gen is None:
+        args.moead_max_gen = 80
 
     env, height, meta = GridEnv.load_npz(args.terrain)
     inflate_cells = int(np.ceil(args.inflate / env.resolution)) if args.inflate > 0 else 0
@@ -80,6 +125,8 @@ def main():
     arch = None
     reps = None
     log = None
+    metric_log = None
+    debug_log = None
 
     if args.planner in ("rrt", "all"):
         path_rrt, _ = rrt_star(env, start, goal, n_iter=args.rrt_iter, seed=args.seed)
@@ -101,7 +148,32 @@ def main():
                 print("PRM stats:", prm_graph.stats)
 
     if args.planner in ("moead", "all"):
-        _, arch, log = moead(env, start, goal, n_gen=args.moead_gen, pop=args.moead_pop, K=args.K, T=args.moead_T, seed=args.seed)
+        _, arch, log = moead(
+            env, start, goal,
+            n_gen=args.moead_max_gen, pop=args.moead_pop, K=args.K, T=args.moead_T, seed=args.seed,
+            moead_min_gen=args.moead_min_gen,
+            moead_max_gen=args.moead_max_gen,
+            mtoe_tol_fun=args.mtoe_tol_fun,
+            mtoe_confidence=args.mtoe_confidence,
+            init_stratified_ratio=getattr(args, "init_stratified_ratio", 0.60),
+            init_stratified_lateral_frac=getattr(args, "init_stratified_lateral_frac", 0.30),
+            init_stratified_n_bands=getattr(args, "init_stratified_n_bands", 5),
+            init_stratified_progress_jitter=getattr(args, "init_stratified_progress_jitter", 0.08),
+            init_global_random_ratio=getattr(args, "init_global_random_ratio", 0.15),
+            weight_extreme_bias=getattr(args, "weight_extreme_bias", 0.20),
+            extreme_offspring_ratio=getattr(args, "extreme_offspring_ratio", 0.20),
+            extreme_potential_window=getattr(args, "extreme_potential_window", 20),
+            extreme_min_extra_per_obj=getattr(args, "extreme_min_extra_per_obj", 1),
+            extreme_max_frac_per_obj=getattr(args, "extreme_max_frac_per_obj", 0.60),
+            local_search_interval=getattr(args, "local_search_interval", 10),
+            local_search_elite_k=getattr(args, "local_search_elite_k", 3),
+            local_search_attempts_per_obj=getattr(args, "local_search_attempts_per_obj", 2),
+            archive_size=getattr(args, "archive_size", 0),
+        archive_soft_limit=getattr(args, "archive_soft_limit", 320),
+        archive_grid_bins=getattr(args, "archive_grid_bins", 0),
+        archive_keep_extremes=bool(getattr(args, "archive_keep_extremes", 1)),
+            active_subproblem_ratio=getattr(args, "active_subproblem_ratio", 1.0),
+        )
         if arch is not None and len(arch.items) > 0:
             objs = np.array([it.er.obj for it in arch.items], dtype=float)
             idx_f1 = int(np.argmin(objs[:, 0]))
@@ -121,7 +193,8 @@ def main():
                 "score": score,
                 "weights": np.array([1.0, 1.0, 1.0], dtype=float) / 3.0,
             }
-        print("log:", log)
+        metric_log, debug_log = split_moead_log(log)
+        print("log:", metric_log)
 
     out_json = args.out_json.strip()
     if not out_json:
@@ -145,17 +218,29 @@ def main():
         meta=meta,
         extra={
             "planner": args.planner,
-            "planner_log": log,
+            "planner_log": metric_log if args.planner == "moead" or args.planner == "all" else log,
             "planner_args": {
                 "rrt_iter": args.rrt_iter,
                 "prm_samples": args.prm_samples,
                 "prm_k": args.prm_k,
                 "prm_max_edge_len": args.prm_max_edge_len,
                 "prm_threat_weight": args.prm_threat_weight,
-                "moead_gen": args.moead_gen,
+                "moead_max_gen": args.moead_max_gen,
+                "moead_min_gen": args.moead_min_gen,
+                "moead_max_gen": args.moead_max_gen,
+                "mtoe_tol_fun": args.mtoe_tol_fun,
+                "mtoe_confidence": args.mtoe_confidence,
                 "moead_pop": args.moead_pop,
                 "moead_T": args.moead_T,
                 "K": args.K,
+                "archive_size": args.archive_size,
+                "archive_soft_limit": args.archive_soft_limit,
+                "archive_grid_bins": args.archive_grid_bins,
+                "archive_keep_extremes": int(args.archive_keep_extremes),
+                "utility_update_interval": args.utility_update_interval,
+                "utility_use_archive_density": int(args.utility_use_archive_density),
+                "log_flush_every": args.log_flush_every,
+                "active_subproblem_ratio": args.active_subproblem_ratio,
             },
         },
     )
