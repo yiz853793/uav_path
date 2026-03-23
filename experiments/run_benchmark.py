@@ -4,6 +4,7 @@ import os
 import json
 import time
 import glob
+import csv
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -36,6 +37,229 @@ def append_log(log_path: str, text: str):
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(text.rstrip() + "\n")
 
+
+def _safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def _safe_int(x):
+    try:
+        return int(x)
+    except Exception:
+        return None
+
+
+def _append_rows_csv(csv_path: str, rows: list[dict], preset_fieldnames: list[str] | None = None):
+    if not csv_path:
+        return
+    ensure_dir(os.path.dirname(csv_path) or ".")
+    rows = rows or []
+    fieldnames = list(preset_fieldnames or [])
+    for r in rows:
+        for k in r.keys():
+            if k not in fieldnames:
+                fieldnames.append(k)
+    file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
+    existing = []
+    if file_exists:
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            try:
+                reader = csv.DictReader(f)
+                existing = list(reader.fieldnames or [])
+            except Exception:
+                existing = []
+    if existing:
+        fieldnames = list(existing) + [k for k in fieldnames if k not in existing]
+    if not fieldnames:
+        return
+    mode = "a" if file_exists and existing == fieldnames else "w"
+    all_rows = rows
+    if mode == "w" and file_exists and existing:
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            prev = list(reader)
+        all_rows = prev + rows
+    with open(csv_path, mode, newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if mode == "w" or not file_exists:
+            writer.writeheader()
+        for r in all_rows:
+            writer.writerow({k: r.get(k) for k in fieldnames})
+
+
+def parse_moead_debug_log_to_rows(log_path: str, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
+    if not log_path or not os.path.exists(log_path):
+        return [], []
+    import re
+    common = {}
+    rows_gen, rows_mtoe = [], []
+    pat_start = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[start\].*?env\(H=(?P<H>\d+),W=(?P<W>\d+)\).*?seed=(?P<seed>\d+).*?n_gen=(?P<n_gen>\d+).*?pop=(?P<pop>\d+).*?K=(?P<K>\d+).*?T=(?P<T>\d+).*$"
+    )
+    pat_gen = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[gen=(?P<gen>\d+)\]"
+        r".*?total=(?P<total>[0-9.]+)s"
+        r".*?archive=(?P<archive>\d+)"
+        r".*?feasible=(?P<feas>\d+)\/(?P<pop>\d+)"
+        r".*?(?:eval=(?P<eval>[0-9.]+)ms)?"
+        r".*?(?:repair=(?P<repair>[0-9.]+)ms)?"
+        r".*?(?:smooth=(?P<smooth>[0-9.]+)ms)?"
+        r".*?(?:neigh=(?P<neigh>[0-9.]+)ms)?"
+        r".*?(?:best_feas=\[(?P<best>[^\]]+)\])?"
+        r".*?(?:extra=\[(?P<extra>[^\]]+)\])?"
+        r".*?(?:ls=\[(?P<ls>[^\]]+)\])?"
+        r".*$"
+    )
+    pat_mtoe = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[gen=(?P<gen>\d+)\]\[mtoe\].*?"
+        r"value=(?P<value>[-+eE0-9.]+)"
+        r"(?:.*?idx=(?P<idx>\d+))?"
+        r"(?:.*?nonzero=(?P<nonzero>\d+))?"
+        r"(?:.*?mean=(?P<mean>[-+eE0-9.]+))?"
+        r"(?:.*?p90=(?P<p90>[-+eE0-9.]+))?"
+        r"(?:.*?std=(?P<std>[-+eE0-9.]+))?"
+        r"(?:.*?var=(?P<var>[-+eE0-9.]+))?"
+        r"(?:.*?p_support=(?P<p_support>[-+eE0-9.]+))?"
+        r"(?:.*?mean_guard=(?P<mean_guard>[-+eE0-9.]+))?"
+        r"(?:.*?tol_fun=(?P<tol_fun>[-+eE0-9.]+))?"
+        r"(?:.*?confidence=(?P<confidence>[-+eE0-9.]+))?"
+        r"(?:.*?z_shift_inf=(?P<z_shift_inf>[-+eE0-9.]+))?"
+        r"(?:.*?window=\[(?P<window_min>[-+eE0-9.]+),(?P<window_max>[-+eE0-9.]+)\])?"
+        r".*$"
+    )
+    pat_stop = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[stop\].*?(?:reason=)?(?P<reason>[^,]+).*$")
+    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            s = line.strip()
+            if not s:
+                continue
+            m = pat_start.match(s)
+            if m:
+                rows_gen.append(dict(common, row_type='start', timestamp=m.group('ts')))
+                continue
+            m = pat_mtoe.match(s)
+            if m:
+                rows_mtoe.append(dict(common, row_type='mtoe', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), value=_safe_float(m.group('value')), idx=_safe_int(m.group('idx')), nonzero=_safe_int(m.group('nonzero')), mean=_safe_float(m.group('mean')), p90=_safe_float(m.group('p90')), std=_safe_float(m.group('std')), var=_safe_float(m.group('var')), p_support=_safe_float(m.group('p_support')), mean_guard=_safe_float(m.group('mean_guard')), tol_fun=_safe_float(m.group('tol_fun')), confidence=_safe_float(m.group('confidence')), z_shift_inf=_safe_float(m.group('z_shift_inf')), window_min=_safe_float(m.group('window_min')), window_max=_safe_float(m.group('window_max'))))
+                continue
+            m = pat_gen.match(s)
+            if m:
+                best = [x.strip() for x in (m.group('best') or '').split(',') if x.strip()]
+                extra = [x.strip() for x in (m.group('extra') or '').split(',') if x.strip()]
+                ls = [x.strip() for x in (m.group('ls') or '').split(',') if x.strip()]
+                row = dict(common, row_type='gen', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), total_s=_safe_float(m.group('total')), archive=_safe_int(m.group('archive')), feasible=_safe_int(m.group('feas')), pop=_safe_int(m.group('pop')), eval_ms=_safe_float(m.group('eval')), repair_ms=_safe_float(m.group('repair')), smooth_ms=_safe_float(m.group('smooth')), neigh_ms=_safe_float(m.group('neigh')))
+                if row['feasible'] is not None and row['pop']:
+                    row['feasible_pct'] = 100.0 * row['feasible'] / row['pop']
+                for i in range(min(3, len(best))):
+                    row[f'best_feas_f{i+1}'] = _safe_float(best[i])
+                for i in range(min(3, len(extra))):
+                    row[f'extra_{i+1}'] = _safe_int(extra[i])
+                for i in range(min(3, len(ls))):
+                    row[f'ls_{i+1}'] = _safe_int(ls[i])
+                rows_gen.append(row)
+                continue
+            m = pat_stop.match(s)
+            if m:
+                rows_mtoe.append(dict(common, row_type='stop', timestamp=m.group('ts'), reason=(m.group('reason') or '').strip()))
+    return rows_gen, rows_mtoe
+
+
+def mtoe_summary_row_from_metrics(moead_metric_block: dict | None, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
+    mo = moead_metric_block or {}
+    mtoe = mo.get('mtoe') or {}
+    return {
+        'row_type': 'summary',
+        'stop_reason': mo.get('stop_reason'),
+    }
+
+
+def parse_mtoe_debug_dump_to_rows(log_path: str, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
+    if not log_path or not os.path.exists(log_path):
+        return []
+    rows = []
+    section = None
+    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for raw in f:
+            line = raw.rstrip('\n')
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith('[') and s.endswith(']') and len(s) > 2:
+                section = s[1:-1]
+                continue
+            if ':' in s and section is None:
+                k, v = s.split(':', 1)
+                rows.append(dict(row_type='kv', section='__meta__', key=k.strip(), value=v.strip()))
+            else:
+                rows.append(dict(row_type='section', section=section or '__body__', value=s))
+    return rows
+
+
+def debug_payload_to_rows(debug_payload, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
+    if not isinstance(debug_payload, dict) or not debug_payload:
+        return []
+    rows = []
+    common = {}
+    for key, value in debug_payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            rows.append(dict(common, row_type='payload_scalar', section=key, value=value))
+        else:
+            rows.append(dict(common, row_type='payload_json', section=key, value=json.dumps(value, ensure_ascii=False)))
+    return rows
+
+
+def flatten_case_row(row: dict) -> dict:
+    rep_objs = row.get("rep_objs") or {}
+
+    def _obj(name: str, idx: int):
+        vals = rep_objs.get(name)
+        if isinstance(vals, (list, tuple)) and len(vals) >= 3:
+            try:
+                return float(vals[idx])
+            except Exception:
+                return None
+        return None
+
+    out = {
+        "invalid_case": int(bool(row.get("invalid_case", False))),
+        "invalid_reason": "|".join(row.get("invalid_reason") or []),
+        "rrt_found": int(bool(row.get("rrt_found", False))),
+        "rrt_ms": row.get("rrt_ms"),
+        "rrt_feasible": int(bool(row.get("rrt_feasible", False))),
+        "prm_found": int(bool(row.get("prm_found", False))),
+        "prm_ms": row.get("prm_ms"),
+        "prm_feasible": int(bool(row.get("prm_feasible", False))),
+        "moead_ms": row.get("moead_ms"),
+        "moead_archive_size": row.get("moead_archive_size"),
+        "moead_stop_reason": row.get("moead_stop_reason"),
+        "moead_n_gen": row.get("moead_n_gen"),
+        "moead_mtoe_last": row.get("moead_mtoe_last"),
+    }
+
+    for prefix in ["rrt", "prm"]:
+        vals = row.get(f"{prefix}_obj")
+        if isinstance(vals, (list, tuple)) and len(vals) >= 3:
+            out[f"{prefix}_f1"] = vals[0]
+            out[f"{prefix}_f2"] = vals[1]
+            out[f"{prefix}_f3"] = vals[2]
+        else:
+            out[f"{prefix}_f1"] = None
+            out[f"{prefix}_f2"] = None
+            out[f"{prefix}_f3"] = None
+
+    for name in ["min_f1", "min_f2", "min_f3", "compromise"]:
+        out[f"rep_{name}_f1"] = _obj(name, 0)
+        out[f"rep_{name}_f2"] = _obj(name, 1)
+        out[f"rep_{name}_f3"] = _obj(name, 2)
+
+    return out
+
+def write_summary_csv(csv_path: str, summary: dict):
+    if not csv_path or not summary:
+        return
+    _append_rows_csv(csv_path, [summary], preset_fieldnames=list(summary.keys()))
 
 def map_size_name(H: int, W: int) -> str:
     # 你项目里的默认小地图：H=160,W=200
@@ -244,10 +468,10 @@ def build_moead_metrics_block(args, log, runtime_ms: float, archive_size: int):
     return block, debug_log
 
 
-def summarize_results(all_rows: list, log_path: str, args):
+def summarize_results(all_rows: list, log_path: str, args, summary_csv_path: str = ""):
     if not all_rows:
         append_log(log_path, f"[{now_str()}] Benchmark finished but no valid rows.")
-        return
+        return None
 
     # NOTE: some terrains can be invalid tasks (start/goal inside no-fly zone or out of bounds).
     # We keep them in rows for traceability, but exclude them from success-rate and runtime stats.
@@ -446,6 +670,63 @@ def summarize_results(all_rows: list, log_path: str, args):
 
     append_log(log_path, "\n".join(text))
 
+    summary_row = {
+        "timestamp": now_str(),
+        "terrain_count": n_total,
+        "valid_cases": n_valid,
+        "invalid_cases": n_invalid,
+        "inflate_m": float(args.inflate),
+        "rrt_found": rrt_found,
+        "prm_found": prm_found,
+        "moead_archive_gt0": moead_has_arch,
+        "rrt_found_rate": float(rrt_found / denom),
+        "prm_found_rate": float(prm_found / denom),
+        "moead_archive_gt0_rate": float(moead_has_arch / denom),
+        "rrt_runtime_ms_mean": rrt_mean,
+        "rrt_runtime_ms_std": rrt_std,
+        "prm_runtime_ms_mean": prm_mean,
+        "prm_runtime_ms_std": prm_std,
+        "moead_runtime_ms_mean": moead_mean,
+        "moead_runtime_ms_std": moead_std,
+        "moead_n_gen_mean": moead_gen_mean,
+        "moead_n_gen_std": moead_gen_std,
+        "archive_size_mean": arch_mean,
+        "archive_size_std": arch_std,
+        "stop_reasons": json.dumps(stop_reason_counter, ensure_ascii=False, sort_keys=True),
+    }
+
+    if rrt_obj_rows:
+        A = np.array([r["rrt_obj"] for r in rrt_obj_rows], dtype=float)
+        m_rrt = A.mean(axis=0)
+        s_rrt = A.std(axis=0)
+        summary_row.update({
+            "rrt_f1_mean": float(m_rrt[0]), "rrt_f1_std": float(s_rrt[0]),
+            "rrt_f2_mean": float(m_rrt[1]), "rrt_f2_std": float(s_rrt[1]),
+            "rrt_f3_mean": float(m_rrt[2]), "rrt_f3_std": float(s_rrt[2]),
+        })
+    if prm_obj_rows:
+        A = np.array([r["prm_obj"] for r in prm_obj_rows], dtype=float)
+        m_prm = A.mean(axis=0)
+        s_prm = A.std(axis=0)
+        summary_row.update({
+            "prm_f1_mean": float(m_prm[0]), "prm_f1_std": float(s_prm[0]),
+            "prm_f2_mean": float(m_prm[1]), "prm_f2_std": float(s_prm[1]),
+            "prm_f3_mean": float(m_prm[2]), "prm_f3_std": float(s_prm[2]),
+        })
+    if reps_rows:
+        for key in ["min_f1", "min_f2", "min_f3", "compromise"]:
+            A = np.array([r["rep_objs"][key] for r in reps_rows], dtype=float)
+            m_rep = A.mean(axis=0)
+            s_rep = A.std(axis=0)
+            summary_row.update({
+                f"rep_{key}_f1_mean": float(m_rep[0]), f"rep_{key}_f1_std": float(s_rep[0]),
+                f"rep_{key}_f2_mean": float(m_rep[1]), f"rep_{key}_f2_std": float(s_rep[1]),
+                f"rep_{key}_f3_mean": float(m_rep[2]), f"rep_{key}_f3_std": float(s_rep[2]),
+            })
+
+    write_summary_csv(summary_csv_path, summary_row)
+    return summary_row
+
 
 def _maybe_parse_xy_list(v: Optional[list]) -> Optional[list]:
     if v is None:
@@ -539,7 +820,12 @@ def main():
     ap.add_argument("--goal", type=float, nargs=2, default=None, help="goal point in meters: x_m y_m")
 
     ap.add_argument("--outdir", type=str, default=None, help="alias of --out_root")
+    ap.add_argument("--single_case_out_dir", type=str, default="", help="when set, write outputs of a single terrain directly into this directory")
     ap.add_argument("--summary_log", type=str, default="", help="append overall summary to this log file (default: out_root/benchmark_summary.log)")
+    ap.add_argument("--summary_csv", type=str, default="", help="write one-row benchmark summary CSV (default: out_root/benchmark_summary.csv)")
+    ap.add_argument("--moead_debug_csv", type=str, default="", help="optional CSV path for parsed per-generation rows; default writes into each seed folder as moead_debug.csv")
+    ap.add_argument("--mtoe_csv", type=str, default="", help="optional CSV path for parsed MTOE rows; default writes into each seed folder as mtoe.csv")
+    ap.add_argument("--mtoe_debug_csv", type=str, default="", help="optional CSV path for parsed original mtoe_debug log; default writes into each seed folder as mtoe_debug.csv")
     ap.add_argument(
         "--start_goal_z_offset",
         type=float,
@@ -582,6 +868,12 @@ def main():
     summary_log = args.summary_log.strip()
     if not summary_log:
         summary_log = os.path.join(args.out_root, "benchmark_summary.log")
+    summary_csv = args.summary_csv.strip()
+    if not summary_csv:
+        summary_csv = os.path.join(args.out_root, "benchmark_summary.csv")
+    moead_debug_csv = args.moead_debug_csv.strip()
+    mtoe_csv = args.mtoe_csv.strip()
+    mtoe_debug_csv = args.mtoe_debug_csv.strip()
 
     astar_tag = astar_tag_from_args(args)
     moead_core_tag = moead_core_tag_from_args(args)
@@ -613,8 +905,10 @@ def main():
             else:
                 size_tag = map_size_name(env.H, env.W)
     
-            # 输出目录：按尺寸分桶，避免不同尺寸的同 seed 覆盖
-            if terrain_seed is None:
+            # 输出目录：默认按尺寸分桶；若 single_case_out_dir 给定，则直接写到该目录
+            if args.single_case_out_dir.strip():
+                out_dir = args.single_case_out_dir.strip()
+            elif terrain_seed is None:
                 out_dir = os.path.join(args.out_root, size_tag, os.path.splitext(base)[0])
             else:
                 out_dir = os.path.join(args.out_root, size_tag, f"seed{terrain_seed:04d}")
@@ -732,9 +1026,10 @@ def main():
                 with open(out_json, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
     
-                all_rows.append({
+                row = {
                     "terrain_base": base,
                     "terrain_seed": terrain_seed,
+                    "planner_seed": planner_seed,
                     "H": int(env.H),
                     "W": int(env.W),
                     "size_tag": size_tag,
@@ -754,7 +1049,8 @@ def main():
                     "moead_n_gen": 0,
                     "moead_mtoe_last": None,
                     "rep_objs": None,
-                })
+                }
+                all_rows.append(row)
                 print("[skip-invalid]", base, "reason=", ",".join(reason), "->", out_dir)
                 continue
     
@@ -989,21 +1285,65 @@ def main():
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
             if args.moead_debug:
-                debug_log = os.path.join(
-                    out_dir,
-                    os.path.basename(out_json).replace("metrics_", "mtoe_debug_").replace(".json", ".log")
-                )
-                write_mtoe_debug_log(
-                    debug_log,
-                    terrain_file=tp,
+                moead_debug_csv_path = moead_debug_csv or os.path.join(out_dir, "moead_debug.csv")
+                mtoe_csv_path = mtoe_csv or os.path.join(out_dir, "mtoe.csv")
+                mtoe_debug_csv_path = mtoe_debug_csv or os.path.join(out_dir, "mtoe_debug.csv")
+                moead_debug_path = os.path.join(out_dir, "moead_debug.log")
+                gen_rows, mtoe_rows = parse_moead_debug_log_to_rows(
+                    moead_debug_path,
+                    terrain_base=base,
                     terrain_seed=terrain_seed,
-                    planner_seed=args.planner_seed,
-                    debug_payload=moead_debug_payload,
+                    planner_seed=planner_seed,
+                    size_tag=size_tag,
                 )
+                _append_rows_csv(
+                    moead_debug_csv_path,
+                    gen_rows,
+                    preset_fieldnames=['row_type','timestamp','gen','total_s','archive','feasible','feasible_pct','eval_ms','repair_ms','smooth_ms','neigh_ms','best_feas_f1','best_feas_f2','best_feas_f3','extra_1','extra_2','extra_3','ls_1','ls_2','ls_3']
+                )
+                if not mtoe_rows:
+                    mtoe_rows = [mtoe_summary_row_from_metrics(moead_metric_block)]
+                _append_rows_csv(
+                    mtoe_csv_path,
+                    mtoe_rows,
+                    preset_fieldnames=['row_type','timestamp','gen','value','idx','nonzero','mean','p90','std','var','p_support','mean_guard','tol_fun','confidence','z_shift_inf','window_min','window_max','reason','stop_reason']
+                )
+                mtoe_dump_path = "mtoe_debug.log"
+                mtoe_dump_path = os.path.join(out_dir, mtoe_dump_path)
+                if not os.path.exists(mtoe_dump_path) and moead_debug_payload:
+                    write_mtoe_debug_log(
+                        mtoe_dump_path,
+                        terrain_file=tp,
+                        terrain_seed=terrain_seed,
+                        planner_seed=planner_seed,
+                        debug_payload=moead_debug_payload,
+                    )
+                mtoe_debug_rows = parse_mtoe_debug_dump_to_rows(
+                    mtoe_dump_path,
+                    terrain_base=base,
+                    terrain_seed=terrain_seed,
+                    planner_seed=planner_seed,
+                    size_tag=size_tag,
+                )
+                if not mtoe_debug_rows:
+                    mtoe_debug_rows = debug_payload_to_rows(
+                        moead_debug_payload,
+                        terrain_base=base,
+                        terrain_seed=terrain_seed,
+                        planner_seed=planner_seed,
+                        size_tag=size_tag,
+                    )
+                _append_rows_csv(
+                    mtoe_debug_csv_path,
+                    mtoe_debug_rows,
+                    preset_fieldnames=['row_type','section','key','value']
+                )
+
     
-            all_rows.append({
+            row = {
                 "terrain_base": base,
                 "terrain_seed": terrain_seed,
+                "planner_seed": planner_seed,
                 "H": int(env.H),
                 "W": int(env.W),
                 "size_tag": size_tag,
@@ -1021,14 +1361,16 @@ def main():
                 "moead_stop_reason": log.get("stop_reason"),
                 "moead_n_gen": int(log.get("n_gen", args.moead_max_gen)),
                 "rep_objs": rep_objs,
-            })
+            }
+            all_rows.append(row)
     
             print("[done]", base, "->", out_dir)
     
-    summarize_results(all_rows, summary_log, args)
+    summarize_results(all_rows, summary_log, args, summary_csv_path=summary_csv)
 
     print("Benchmark finished.")
     print("Summary appended to:", summary_log)
+    print("Summary CSV:", summary_csv)
 
 
 if __name__ == "__main__":

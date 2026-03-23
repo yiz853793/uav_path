@@ -325,6 +325,58 @@ python -m experiments.run_benchmark \
   --out_root outputs
 ```
 
+
+## 6.4 reproducibility benchmark（按 seed / run 组织）
+
+如果你要对**同一个场景 seed 重复跑多次**，推荐使用：
+
+```bash
+python -m experiments.run_reproducibility   --repeat_count 7   --out_root outputs_repro_hill_city   --   --terrain_type hill_city   --city_density 0.24   --seed_from 0   --seed_to 20   --planner_seed 0   --moead_debug
+```
+
+它会把结果组织成：
+
+```text
+outputs_repro_hill_city/
+  seed0000/
+    run00/
+    run01/
+    ...
+    run06/
+  seed0001/
+    run00/
+    ...
+  ...
+```
+
+也就是：
+
+- 外层 `seed0000/` 表示 terrain seed
+- 内层 `run00/` 表示这个 seed 的第 1 次重复运行
+
+每个 `runXX/` 目录里都会直接保存这一轮 `run_benchmark` 的原始输出，例如：
+
+- `benchmark_summary.csv`
+- `benchmark_summary.log`
+- `metrics_*.json`
+- `visdata_*.json`
+- `moead_debug.log`
+- `mtoe_debug.log`
+- `moead_debug.csv`
+- `mtoe.csv`
+- `mtoe_debug.csv`
+
+此外，在 `out_root` 下还会额外生成两个总表：
+
+- `reproducibility_summary.csv`：一行对应一次 `seedXXXX/runYY`
+- `reproducibility_cases.csv`：一行对应一个 `metrics_*.json` case，便于后续统计 mean/std
+
+注意：
+
+- `run_reproducibility` 会自动为每个 `seed + run` 单独调用一次 `run_benchmark`
+- 你在 `--` 后面传的参数，基本都和 `run_benchmark` 一样
+- 输出目录相关参数（如 `--out_root` / `--summary_csv`）会由脚本自己接管，不需要再传
+
 也可以直接用 `--glob` 指定任意模式：
 
 ```bash
@@ -387,6 +439,45 @@ python -m experiments.render_from_vis_json --input outputs/hill_city_0.24 --mode
 ```bash
 python -m experiments.gen_dataset --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20
 python -m experiments.run_benchmark \
+  --terrain_type hill_city \
+  --city_density 0.24 \
+  --seed_from 0 \
+  --seed_to 20 \
+  --out_root outputs \
+  --inflate 1 \
+  --rrt_iter 6000 \
+  --prm_samples 12000 \
+  --prm_k 48 \
+  --prm_max_edge_len 250 \
+  --prm_threat_weight 0.0 \
+  --moead_pop 160 \
+  --moead_min_gen 80 \
+  --moead_max_gen 500 \
+  --mtoe_tol_fun 1e-5 \
+  --mtoe_confidence 0.99 \
+  --K 30 \
+  --moead_T 16 \
+  --init_astar_ratio 0.20 \
+  --init_astar_threat_weight 2.0 \
+  --init_astar_max_paths 6 \
+  --init_stratified_ratio 0.60 \
+  --init_global_random_ratio 0.15 \
+  --weight_extreme_bias 0.20 \
+  --extreme_offspring_ratio 0.20 \
+  --extreme_potential_window 20 \
+  --extreme_min_extra_per_obj 1 \
+  --extreme_max_frac_per_obj 0.60 \
+  --local_search_interval 10 \
+  --local_search_elite_k 3 \
+  --local_search_attempts_per_obj 2 \
+  --archive_size 0 \
+  --active_subproblem_ratio 0.80 \
+  --utility_update_interval 3 \
+  --utility_use_archive_density 0 \
+  --log_flush_every 10 \
+  --moead_debug
+python -m experiments.run_reproducibility \
+  --repeat_count 7 \
   --terrain_type hill_city \
   --city_density 0.24 \
   --seed_from 0 \
