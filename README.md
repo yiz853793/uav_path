@@ -11,12 +11,6 @@
 当前支持三类地形：
 
 - **mountain**：山地地形，支持 `S / M / L` 三档尺寸
-
-MOEA/D 相关脚本现在统一支持两个新增参数：
-
-- `--archive_size`：archive 上限；`<= 0` 表示**不设上限**
-- `--active_subproblem_ratio`：每代实际激活的子问题比例，范围 `(0, 1]`
-
 - **city**：纯城市场景，固定为 **1600 × 2000**
 - **hill_city**：山地城市混合场景，固定为 **1600 × 2000**，用于更接近真实 UAV 城市低空规划的测试
 
@@ -242,46 +236,16 @@ shape=1600x2000, param_density=0.1200, actual_occupancy=0.5431, z_max=108.00
 
 # 5. 单次规划
 
-## 5.4 MOEA/D 加速版新增参数
-
-以下四个入口已经统一支持同一组 MOEA/D 新参数：
-
-- `main.py`
-- `experiments/plan_from_terrain.py`
-- `experiments/run_benchmark.py`
-- `README` 中的示例命令
-
-重点参数：
+## 5.1 从已有 `.npz` 做单次规划
 
 ```bash
---archive_size 0
---active_subproblem_ratio 0.80
-```
-
-含义：
-
-- `--archive_size 0`：不限制 Pareto archive 大小
-- `--active_subproblem_ratio 0.80`：每代只重点演化 80% 的子问题，用于加速
-
-`benchmark_summary.log` 里也会报告这两个参数。
-
-
-从已有 `.npz` 做单次规划：
-
-```bash
-python -m experiments.plan_from_terrain \
-  --terrain terrains/hill_city_0.24/hill_city_seed0000.npz \
-  --planner all \
-  --seed 0
+python -m experiments.plan_from_terrain   --terrain terrains/hill_city_0.24/hill_city_seed0000.npz   --planner all   --seed 0
 ```
 
 或：
 
 ```bash
-python -m experiments.plan_from_terrain \
-  --terrain terrains/S/mountain_seed0000.npz \
-  --planner moead \
-  --seed 0
+python -m experiments.plan_from_terrain   --terrain terrains/S/mountain_seed0000.npz   --planner moead   --seed 0
 ```
 
 说明：
@@ -291,6 +255,46 @@ python -m experiments.plan_from_terrain \
 - 生成的 `visdata_*.json` 会显式保存 `start` 与 `goal`
 - PRM 当前走的是 **3D 节点版本**，在城市/山体上方的合法空域也可以布点
 
+## 5.2 `run_benchmark` 参数精简
+
+`experiments/run_benchmark.py` 现在优先推荐使用 **preset + 短参数** 的方式。
+
+### 5.2.1 新增 preset
+
+```bash
+-P auto|quick|balanced|quality
+```
+
+含义：
+
+- `auto`：默认值；`mountain/small` 自动走 `quick`，`city / hill_city / medium / large` 自动走 `balanced`
+- `quick`：快速摸底
+- `balanced`：推荐默认 benchmark 档
+- `quality`：更高预算、更重结果质量
+
+preset 会统一覆盖一组常用参数（如 `inflate / rrt_iter / prm_samples / prm_k / prm_max_edge_len / moead_pop / moead_min_gen / moead_max_gen / moead_T / active_subproblem_ratio / archive_soft_limit`），但**你手动传入的显式参数优先级更高**。
+
+### 5.2.2 常用短参数
+
+- `-t / --terrain` -> `--terrain_type`
+- `-d / --density` -> `--city_density`
+- `-n` -> `--num_terrains`
+- `-o` -> `--out_root`
+- `--pseed` -> `--planner_seed`
+- `--pop` -> `--moead_pop`
+- `--gmin` -> `--moead_min_gen`
+- `--gmax` -> `--moead_max_gen`
+- `--prm_n` -> `--prm_samples`
+- `--prm_edge` -> `--prm_max_edge_len`
+- `--active_ratio` -> `--active_subproblem_ratio`
+- `--arch_soft` -> `--archive_soft_limit`
+
+### 5.2.3 调整后的默认思路
+
+- `seed_to` 默认从 `50` 改为 `10`
+- `inflate` 默认从 `5.0` 改为 `1.0`
+- benchmark 更推荐通过 `-P/--profile` 管理预算，而不是在命令行里堆很多长参数
+
 ---
 
 # 6. 批量 benchmark
@@ -298,40 +302,29 @@ python -m experiments.plan_from_terrain \
 ## 6.1 mountain benchmark
 
 ```bash
-python -m experiments.run_benchmark \
-  --terrain_type mountain \
-  --size small \
-  --seed_from 0 --seed_to 10 \
-  --out_root outputs
+python -m experiments.run_benchmark   -t mountain -s small -n 10 -o outputs
 ```
 
 ## 6.2 city benchmark
 
 ```bash
-python -m experiments.run_benchmark \
-  --terrain_type city \
-  --city_density 0.24 \
-  --seed_from 0 --seed_to 10 \
-  --out_root outputs
+python -m experiments.run_benchmark   -t city -d 0.24 -n 10 -o outputs
 ```
 
 ## 6.3 hill_city benchmark
 
 ```bash
-python -m experiments.run_benchmark \
-  --terrain_type hill_city \
-  --city_density 0.24 \
-  --seed_from 0 --seed_to 10 \
-  --out_root outputs
+python -m experiments.run_benchmark   -t hill_city -d 0.24 -n 10 -o outputs
 ```
 
+> 默认 `-P auto` 会在 `city / hill_city` 上自动切到 `balanced` 档。
 
 ## 6.4 reproducibility benchmark（按 seed / run 组织）
 
 如果你要对**同一个场景 seed 重复跑多次**，推荐使用：
 
 ```bash
-python -m experiments.run_reproducibility   --repeat_count 7   --out_root outputs_repro_hill_city   --   --terrain_type hill_city   --city_density 0.24   --seed_from 0   --seed_to 20   --planner_seed 0   --moead_debug
+python -m experiments.run_reproducibility   --repeat_count 7   --out_root outputs_repro_hill_city   --   -t hill_city -d 0.24 -n 20 --pseed 0 -P balanced --moead_debug
 ```
 
 它会把结果组织成：
@@ -380,9 +373,7 @@ outputs_repro_hill_city/
 也可以直接用 `--glob` 指定任意模式：
 
 ```bash
-python -m experiments.run_benchmark \
-  --glob 'terrains/hill_city_0.12/hill_city_seed*.npz' \
-  --out_root outputs
+python -m experiments.run_benchmark   --glob 'terrains/hill_city_0.12/hill_city_seed*.npz'   -o outputs
 ```
 
 benchmark 输出文件：
@@ -398,14 +389,7 @@ benchmark 输出文件：
 如果你要单独分析某一张 terrain `.npz` 上 PRM 为什么成功或失败，推荐使用：
 
 ```bash
-python -m test.analyze_prm_from_npz \
-  --terrain_npz terrains/hill_city_0.24/hill_city_seed0000.npz \
-  --out_dir prm_debug_seed0 \
-  --prm_samples 12000 \
-  --prm_k 48 \
-  --prm_max_edge_len 250 \
-  --seed 0 \
-  --save_occ_height
+python -m test.analyze_prm_from_npz   --terrain_npz terrains/hill_city_0.24/hill_city_seed0000.npz   --out_dir prm_debug_seed0   --prm_samples 12000   --prm_k 48   --prm_max_edge_len 250   --seed 0   --save_occ_height
 ```
 
 输出通常包括：
@@ -438,60 +422,21 @@ python -m experiments.render_from_vis_json --input outputs/hill_city_0.24 --mode
 
 ```bash
 python -m experiments.gen_dataset --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 3
-python -m experiments.run_benchmark --terrain_type hill_city --planner_seed 2 --city_density 0.24 --seed_from 0 --seed_to 3 --out_root outputs --inflate 1 --rrt_iter 6000 --prm_samples 12000 --prm_k 48 --prm_max_edge_len 250 --prm_threat_weight 0.0 --moead_pop 160 --moead_min_gen 80 --moead_max_gen 500 --mtoe_tol_fun 1e-5 --mtoe_confidence 0.99 --K 30 --moead_T 16 --init_astar_ratio 0.20 --init_astar_threat_weight 2.0 --init_astar_max_paths 6 --init_stratified_ratio 0.60 --init_global_random_ratio 0.15 --weight_extreme_bias 0.20 --extreme_offspring_ratio 0.20 --extreme_potential_window 20 --extreme_min_extra_per_obj 1 --extreme_max_frac_per_obj 0.60 --local_search_interval 10 --local_search_elite_k 3 --local_search_attempts_per_obj 2 --archive_size 0 --active_subproblem_ratio 0.80 --utility_update_interval 3 --utility_use_archive_density 0 --log_flush_every 10 --moead_debug
-python -m experiments.run_reproducibility \
-  --repeat_count 7 \
-  --terrain_type hill_city \
-  --city_density 0.24 \
-  --seed_from 0 \
-  --seed_to 20 \
-  --out_root outputs \
-  --inflate 1 \
-  --rrt_iter 6000 \
-  --prm_samples 12000 \
-  --prm_k 48 \
-  --prm_max_edge_len 250 \
-  --prm_threat_weight 0.0 \
-  --moead_pop 160 \
-  --moead_min_gen 80 \
-  --moead_max_gen 500 \
-  --mtoe_tol_fun 1e-5 \
-  --mtoe_confidence 0.99 \
-  --K 30 \
-  --moead_T 16 \
-  --init_astar_ratio 0.20 \
-  --init_astar_threat_weight 2.0 \
-  --init_astar_max_paths 6 \
-  --init_stratified_ratio 0.60 \
-  --init_global_random_ratio 0.15 \
-  --weight_extreme_bias 0.20 \
-  --extreme_offspring_ratio 0.20 \
-  --extreme_potential_window 20 \
-  --extreme_min_extra_per_obj 1 \
-  --extreme_max_frac_per_obj 0.60 \
-  --local_search_interval 10 \
-  --local_search_elite_k 3 \
-  --local_search_attempts_per_obj 2 \
-  --archive_size 0 \
-  --active_subproblem_ratio 0.80 \
-  --utility_update_interval 3 \
-  --utility_use_archive_density 0 \
-  --log_flush_every 10 \
-  --moead_debug
+python -m experiments.run_benchmark -t hill_city -d 0.24 -n 3 -o outputs --pseed 2 -P balanced --moead_debug
+python -m experiments.run_reproducibility   --repeat_count 7   --out_root outputs_repro   --   -t hill_city -d 0.24 -n 20 --pseed 0 -P balanced --moead_debug
 python -m experiments.render_from_vis_json --input outputs/hill_city_0.24 --mode all --project_root .
+```
+
+如果 `balanced` 还不够，再按需加少量覆盖参数，例如：
+
+```bash
+python -m experiments.run_benchmark   -t hill_city -d 0.24 -n 3 -o outputs   -P quality --pseed 2 --gmax 800 --pop 192 --active_ratio 0.90 --moead_debug
 ```
 
 ## 9.2 快速调试单张地形上的 PRM
 
 ```bash
-python -m test.analyze_prm_from_npz \
-  --terrain_npz terrains/hill_city_0.24/hill_city_seed0000.npz \
-  --out_dir prm_debug_seed0 \
-  --prm_samples 12000 \
-  --prm_k 48 \
-  --prm_max_edge_len 250 \
-  --seed 0 \
-  --save_occ_height
+python -m test.analyze_prm_from_npz   --terrain_npz terrains/hill_city_0.24/hill_city_seed0000.npz   --out_dir prm_debug_seed0   --prm_samples 12000   --prm_k 48   --prm_max_edge_len 250   --seed 0   --save_occ_height
 ```
 
 ---
@@ -518,6 +463,10 @@ python -m test.analyze_prm_from_npz \
 - 起终点接入失败
 - 还是边碰撞检查过严
 
+推荐先从下面这条命令开始：
+
 ```bash
-python -m experiments.run_benchmark --terrain_type hill_city --planner_seed 2 --city_density 0.24 --seed_from 0 --seed_to 3 --out_root outputs --inflate 1 --rrt_iter 6000 --prm_samples 12000 --prm_k 48 --prm_max_edge_len 250 --prm_threat_weight 0.0 --moead_pop 160 --moead_min_gen 80 --moead_max_gen 1500 --mtoe_tol_fun 1e-5 --mtoe_confidence 0.99 --disable_mtoe_stop --K 30 --moead_T 16 --init_astar_ratio 0.25 --init_astar_threat_weight 1.8 --init_astar_max_paths 5 --init_astar_penalty_step 2.5 --init_backbone_threat_power 1.35 --init_backbone_clearance_weight 0.35 --init_backbone_lateral_bias 0.28 --init_backbone_time_budget_s 2.0 --init_backbone_coarse_min_factor 4 --init_stratified_ratio 0.55 --init_stratified_lateral_frac 0.30 --init_stratified_n_bands 5 --init_stratified_progress_jitter 0.08 --init_global_random_ratio 0.20 --weight_extreme_bias 0.20 --extreme_offspring_ratio 0.20 --extreme_potential_window 20 --extreme_min_extra_per_obj 1 --extreme_max_frac_per_obj 0.60 --local_search_interval 10 --local_search_elite_k 3 --local_search_attempts_per_obj 2 --archive_size 0 --archive_soft_limit 320 --archive_grid_bins 0 --archive_keep_extremes 1 --active_subproblem_ratio 0.80 --utility_update_interval 3 --utility_use_archive_density 0 --log_flush_every 10 --moead_debug
+python -m experiments.run_benchmark   -t hill_city -d 0.24 -n 3 -o outputs   -P quality --pseed 2 --disable_mtoe_stop --moead_debug
 ```
+
+如果要进一步精调，再从这个基础上少量追加覆盖参数，例如 `--gmax / --pop / --prm_n / --prm_edge / --active_ratio / --arch_soft`。

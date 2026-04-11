@@ -6,6 +6,7 @@ import time
 import glob
 import csv
 import argparse
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple
@@ -36,6 +37,110 @@ def append_log(log_path: str, text: str):
     ensure_dir(os.path.dirname(log_path) or ".")
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(text.rstrip() + "\n")
+
+
+RUN_PROFILES = {
+    "quick": {
+        "inflate": 1.0,
+        "rrt_iter": 4000,
+        "prm_samples": 4000,
+        "prm_k": 24,
+        "prm_max_edge_len": 120.0,
+        "prm_threat_weight": 0.0,
+        "moead_min_gen": 40,
+        "moead_max_gen": 200,
+        "moead_pop": 80,
+        "moead_T": 10,
+        "active_subproblem_ratio": 0.75,
+        "archive_size": 0,
+        "archive_soft_limit": 240,
+        "utility_update_interval": 4,
+        "log_flush_every": 20,
+    },
+    "balanced": {
+        "inflate": 1.0,
+        "rrt_iter": 6000,
+        "prm_samples": 12000,
+        "prm_k": 48,
+        "prm_max_edge_len": 250.0,
+        "prm_threat_weight": 0.0,
+        "moead_min_gen": 60,
+        "moead_max_gen": 400,
+        "moead_pop": 128,
+        "moead_T": 14,
+        "active_subproblem_ratio": 0.80,
+        "archive_size": 0,
+        "archive_soft_limit": 320,
+        "utility_update_interval": 3,
+        "log_flush_every": 10,
+    },
+    "quality": {
+        "inflate": 1.0,
+        "rrt_iter": 8000,
+        "prm_samples": 16000,
+        "prm_k": 64,
+        "prm_max_edge_len": 280.0,
+        "prm_threat_weight": 0.0,
+        "moead_min_gen": 80,
+        "moead_max_gen": 600,
+        "moead_pop": 160,
+        "moead_T": 16,
+        "active_subproblem_ratio": 0.90,
+        "archive_size": 0,
+        "archive_soft_limit": 400,
+        "utility_update_interval": 3,
+        "log_flush_every": 10,
+    },
+}
+
+
+PROFILE_OPTION_NAMES = {
+    "inflate": ("--inflate", "-i"),
+    "rrt_iter": ("--rrt_iter", "--rrt"),
+    "prm_samples": ("--prm_samples", "--prm_n"),
+    "prm_k": ("--prm_k",),
+    "prm_max_edge_len": ("--prm_max_edge_len", "--prm_edge"),
+    "prm_threat_weight": ("--prm_threat_weight",),
+    "moead_min_gen": ("--moead_min_gen", "--gmin"),
+    "moead_max_gen": ("--moead_max_gen", "--gmax"),
+    "moead_pop": ("--moead_pop", "--pop"),
+    "moead_T": ("--moead_T", "-T"),
+    "active_subproblem_ratio": ("--active_subproblem_ratio", "--active_ratio"),
+    "archive_size": ("--archive_size",),
+    "archive_soft_limit": ("--archive_soft_limit", "--arch_soft"),
+    "utility_update_interval": ("--utility_update_interval",),
+    "log_flush_every": ("--log_flush_every",),
+}
+
+
+def _cli_option_used(argv: list[str], *option_names: str) -> bool:
+    for token in argv:
+        for opt in option_names:
+            if token == opt or token.startswith(opt + "="):
+                return True
+    return False
+
+
+def _resolve_profile_name(args) -> str:
+    requested = str(getattr(args, "profile", "auto") or "auto").strip().lower()
+    if requested != "auto":
+        return requested
+    terrain_type = str(getattr(args, "terrain_type", "mountain") or "mountain").strip().lower()
+    size = str(getattr(args, "size", "small") or "small").strip().lower()
+    if terrain_type in ("city", "hill_city") or size in ("medium", "large"):
+        return "balanced"
+    return "quick"
+
+
+def apply_run_profile(args, argv: list[str]) -> None:
+    resolved = _resolve_profile_name(args)
+    if resolved not in RUN_PROFILES:
+        raise ValueError(f"unknown run profile: {resolved}")
+    args.profile_resolved = resolved
+    for key, value in RUN_PROFILES[resolved].items():
+        opt_names = PROFILE_OPTION_NAMES.get(key, (f"--{key}",))
+        if not _cli_option_used(argv, *opt_names):
+            setattr(args, key, value)
 
 
 def _safe_float(x):
@@ -695,6 +800,7 @@ def summarize_results(all_rows: list, log_path: str, args, summary_csv_path: str
         text.append("")
     text.append("-" * 80)
     text.append("Experiment Parameters:")
+    text.append(f"  profile = {getattr(args, "profile_resolved", getattr(args, "profile", "auto"))}")
     text.append(f"  inflate = {args.inflate} m")
     text.append(f"  rrt_iter = {args.rrt_iter}")
     text.append("  PRM:")
@@ -788,6 +894,7 @@ def summarize_results(all_rows: list, log_path: str, args, summary_csv_path: str
         "terrain_count": n_total,
         "valid_cases": n_valid,
         "invalid_cases": n_invalid,
+        "profile": getattr(args, "profile_resolved", getattr(args, "profile", "auto")),
         "inflate_m": float(args.inflate),
         "rrt_found": rrt_found,
         "prm_found": prm_found,
@@ -850,31 +957,39 @@ def _maybe_parse_xy_list(v: Optional[list]) -> Optional[list]:
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    argv = sys.argv[1:]
+    ap = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Run benchmark on terrain datasets. Most users only need terrain selection, "
+            "-n/--num_terrains, -o/--out_root and optionally -P/--profile."
+        ),
+    )
 
     ap.add_argument("--terrain_dir", type=str, default="terrains", help="directory containing *.npz terrains")
-    ap.add_argument("--out_root", type=str, default="outputs")
-    ap.add_argument("--terrain_type", type=str, default="mountain", choices=["mountain", "city", "hill_city"], help="terrain type when --glob is not provided")
-    ap.add_argument("--city_density", type=float, default=0.24, help="city density tag when terrain_type=city/hill_city and --glob is not provided")
-    ap.add_argument("--size", type=str, default="small", choices=["small", "medium", "large"], help="mountain size when terrain_type=mountain and --glob is not provided")
+    ap.add_argument("--out_root", "-o", type=str, default="outputs", help="benchmark output root")
+    ap.add_argument("--terrain_type", "--terrain", "-t", dest="terrain_type", type=str, default="mountain", choices=["mountain", "city", "hill_city"], help="terrain type when --glob is not provided")
+    ap.add_argument("--city_density", "--density", "-d", dest="city_density", type=float, default=0.24, help="city density tag when terrain_type=city/hill_city and --glob is not provided")
+    ap.add_argument("--size", "-s", type=str, default="small", choices=["small", "medium", "large"], help="mountain size when terrain_type=mountain and --glob is not provided")
+    ap.add_argument("--profile", "-P", type=str, default="auto", choices=["auto", "quick", "balanced", "quality"], help="preset for common benchmark budgets; explicit CLI values override preset values")
 
-    ap.add_argument("--seed_from", type=int, default=0)
-    ap.add_argument("--seed_to", type=int, default=50, help="exclusive; used if no --glob")
+    ap.add_argument("--seed_from", "--sf", dest="seed_from", type=int, default=0, help="inclusive terrain seed start")
+    ap.add_argument("--seed_to", "--st", dest="seed_to", type=int, default=10, help="exclusive terrain seed end; used if no --glob")
     ap.add_argument("--glob", type=str, default="", help="optional terrain glob, e.g. 'terrains/*/mountain_seed*.npz'")
 
-    ap.add_argument("--planner_seed", type=int, default=0)
+    ap.add_argument("--planner_seed", "--pseed", dest="planner_seed", type=int, default=0, help="single planner seed")
     ap.add_argument("--planner_seeds", type=int, nargs="+", default=None, help="optional list of planner seeds; if provided, overrides --planner_seed")
-    ap.add_argument("--num_terrains", type=int, default=None, help="optional alias for seed_to-seed_from when not using --glob")
-    ap.add_argument("--inflate", type=float, default=5.0, help="inflate obstacle radius in meters")
+    ap.add_argument("--num_terrains", "-n", dest="num_terrains", type=int, default=None, help="alias for seed_to-seed_from when not using --glob")
+    ap.add_argument("--inflate", "-i", type=float, default=1.0, help="inflate obstacle radius in meters")
 
-    ap.add_argument("--rrt_iter", type=int, default=4000)
-    ap.add_argument("--prm_samples", type=int, default=1200)
-    ap.add_argument("--prm_k", type=int, default=12)
-    ap.add_argument("--prm_max_edge_len", type=float, default=30.0)
-    ap.add_argument("--prm_threat_weight", type=float, default=0.0)
+    ap.add_argument("--rrt_iter", "--rrt", dest="rrt_iter", type=int, default=4000, help="RRT* iterations")
+    ap.add_argument("--prm_samples", "--prm_n", dest="prm_samples", type=int, default=1200, help="PRM sample count")
+    ap.add_argument("--prm_k", type=int, default=12, help="PRM neighbors per node")
+    ap.add_argument("--prm_max_edge_len", "--prm_edge", dest="prm_max_edge_len", type=float, default=30.0, help="PRM max edge length in meters")
+    ap.add_argument("--prm_threat_weight", type=float, default=0.0, help="PRM threat weight")
 
-    ap.add_argument("--moead_min_gen", type=int, default=20)
-    ap.add_argument("--moead_max_gen", type=int, default=None)
+    ap.add_argument("--moead_min_gen", "--gmin", dest="moead_min_gen", type=int, default=20, help="minimum MOEA/D generations before early stop")
+    ap.add_argument("--moead_max_gen", "--gmax", dest="moead_max_gen", type=int, default=None, help="maximum MOEA/D generations")
     ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
     ap.add_argument("--mtoe_confidence", type=float, default=0.99)
     ap.add_argument("--disable_mtoe_stop", action="store_true", help="run to moead_max_gen but keep recording shadow MTOE stop events")
@@ -887,11 +1002,11 @@ def main():
     ap.add_argument("--basin_ref_gap_tol", type=float, default=0.08, help="reference-gap threshold for stop_candidate vs escape")
     ap.add_argument("--basin_min_distinct", type=int, default=2, help="minimum distinct basins before stop_candidate is allowed")
     ap.add_argument("--basin_escape_injections", type=int, default=0, help="extra escape injections when basin monitor says action=escape")
-    ap.add_argument("--moead_pop", type=int, default=60)
-    ap.add_argument("--K", type=int, default=30)
+    ap.add_argument("--moead_pop", "--pop", dest="moead_pop", type=int, default=60, help="MOEA/D population size")
+    ap.add_argument("--K", type=int, default=30, help="number of control points per path")
 
     # MOEA/D init seeding params (A* 多样化初始解控制)
-    ap.add_argument("--moead_T", type=int, default=10, help="MOEA/D neighborhood size T")
+    ap.add_argument("--moead_T", "-T", dest="moead_T", type=int, default=10, help="MOEA/D neighborhood size T")
     ap.add_argument("--init_astar_ratio", type=float, default=0.25, help="fraction of population initialized from A* seeding")
     ap.add_argument("--init_astar_threat_weight", type=float, default=0.0, help="A* cost threat weight for seeding (0=ignore threat)")
     ap.add_argument("--init_astar_jitter_sigma", type=float, default=1.5, help="std of Gaussian jitter for A* path points")
@@ -913,17 +1028,17 @@ def main():
     ap.add_argument("--local_search_elite_k", type=int, default=3, help="top-k archive elites per objective used for directional local search")
     ap.add_argument("--local_search_attempts_per_obj", type=int, default=2, help="directional local-search attempts per objective each trigger")
     ap.add_argument("--archive_size", type=int, default=0, help="MOEA/D archive upper bound (>0 uses hard cap; <=0 falls back to archive_soft_limit)")
-    ap.add_argument("--archive_soft_limit", type=int, default=320, help="soft archive cap used when archive_size<=0; improves Pareto spread")
+    ap.add_argument("--archive_soft_limit", "--arch_soft", dest="archive_soft_limit", type=int, default=320, help="soft archive cap used when archive_size<=0; improves Pareto spread")
     ap.add_argument("--archive_grid_bins", type=int, default=0, help="objective-space grid bins for diversity-aware archive truncation (0=auto)")
     ap.add_argument("--archive_keep_extremes", type=int, default=1, help="protect objective extremes during archive truncation (1/0)")
-    ap.add_argument("--active_subproblem_ratio", type=float, default=1.0, help="fraction of subproblems activated each generation (0,1]")
+    ap.add_argument("--active_subproblem_ratio", "--active_ratio", dest="active_subproblem_ratio", type=float, default=1.0, help="fraction of subproblems activated each generation (0,1]")
     ap.add_argument("--utility_update_interval", type=int, default=3, help="update MOEA/D utility every N generations")
     ap.add_argument("--utility_use_archive_density", type=int, default=0, help="whether to mix archive density into utility update (1/0)")
     ap.add_argument("--log_flush_every", type=int, default=10, help="flush MOEA/D debug log every N generations")
 
     # --- MOEA/D debug + performance knobs ---
     ap.add_argument("--moead_debug", action="store_true", help="write MOEA/D debug log to out_dir/moead_debug.log and MTOE stats to mtoe_debug_*.log")
-    ap.add_argument("--moead_debug_every", type=int, default=1, help="log every N generations (default: 1)")
+    ap.add_argument("--moead_debug_every", type=int, default=1, help="log every N generations")
     ap.add_argument("--moead_debug_level", type=int, default=2, help="1=coarse, 2=timing breakdown, 3=collision profiling")
     ap.add_argument(
         "--moead_eval_step",
@@ -955,7 +1070,8 @@ def main():
         default=15.0,
         help="default start/goal altitude offset above local ground, in meters",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    apply_run_profile(args, argv)
     if args.moead_max_gen is None:
         args.moead_max_gen = 80
 
@@ -1156,6 +1272,7 @@ def main():
                     "H": int(env.H),
                     "W": int(env.W),
                     "size_tag": size_tag,
+                    "profile": getattr(args, "profile_resolved", getattr(args, "profile", "auto")),
                     "invalid_case": True,
                     "invalid_reason": reason,
                     "rrt_found": False,
@@ -1313,6 +1430,7 @@ def main():
                 meta=meta,
                 extra={
                     "planner_args": {
+                        "profile": getattr(args, "profile_resolved", getattr(args, "profile", "auto")),
                         "rrt_iter": args.rrt_iter,
                         "prm_samples": args.prm_samples,
                         "prm_k": args.prm_k,
@@ -1485,6 +1603,7 @@ def main():
                 "H": int(env.H),
                 "W": int(env.W),
                 "size_tag": size_tag,
+                "profile": getattr(args, "profile_resolved", getattr(args, "profile", "auto")),
                 "invalid_case": False,
                 "rrt_found": path_rrt is not None,
                 "rrt_ms": float(rrt_ms),
