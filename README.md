@@ -437,45 +437,8 @@ python -m experiments.render_from_vis_json --input outputs/hill_city_0.24 --mode
 ## 9.1 hill_city
 
 ```bash
-python -m experiments.gen_dataset --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20
-python -m experiments.run_benchmark \
-  --terrain_type hill_city \
-  --city_density 0.24 \
-  --seed_from 0 \
-  --seed_to 20 \
-  --out_root outputs \
-  --inflate 1 \
-  --rrt_iter 6000 \
-  --prm_samples 12000 \
-  --prm_k 48 \
-  --prm_max_edge_len 250 \
-  --prm_threat_weight 0.0 \
-  --moead_pop 160 \
-  --moead_min_gen 80 \
-  --moead_max_gen 500 \
-  --mtoe_tol_fun 1e-5 \
-  --mtoe_confidence 0.99 \
-  --K 30 \
-  --moead_T 16 \
-  --init_astar_ratio 0.20 \
-  --init_astar_threat_weight 2.0 \
-  --init_astar_max_paths 6 \
-  --init_stratified_ratio 0.60 \
-  --init_global_random_ratio 0.15 \
-  --weight_extreme_bias 0.20 \
-  --extreme_offspring_ratio 0.20 \
-  --extreme_potential_window 20 \
-  --extreme_min_extra_per_obj 1 \
-  --extreme_max_frac_per_obj 0.60 \
-  --local_search_interval 10 \
-  --local_search_elite_k 3 \
-  --local_search_attempts_per_obj 2 \
-  --archive_size 0 \
-  --active_subproblem_ratio 0.80 \
-  --utility_update_interval 3 \
-  --utility_use_archive_density 0 \
-  --log_flush_every 10 \
-  --moead_debug
+python -m experiments.gen_dataset --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 3
+python -m experiments.run_benchmark --terrain_type hill_city --planner_seed 2 --city_density 0.24 --seed_from 0 --seed_to 3 --out_root outputs --inflate 1 --rrt_iter 6000 --prm_samples 12000 --prm_k 48 --prm_max_edge_len 250 --prm_threat_weight 0.0 --moead_pop 160 --moead_min_gen 80 --moead_max_gen 500 --mtoe_tol_fun 1e-5 --mtoe_confidence 0.99 --K 30 --moead_T 16 --init_astar_ratio 0.20 --init_astar_threat_weight 2.0 --init_astar_max_paths 6 --init_stratified_ratio 0.60 --init_global_random_ratio 0.15 --weight_extreme_bias 0.20 --extreme_offspring_ratio 0.20 --extreme_potential_window 20 --extreme_min_extra_per_obj 1 --extreme_max_frac_per_obj 0.60 --local_search_interval 10 --local_search_elite_k 3 --local_search_attempts_per_obj 2 --archive_size 0 --active_subproblem_ratio 0.80 --utility_update_interval 3 --utility_use_archive_density 0 --log_flush_every 10 --moead_debug
 python -m experiments.run_reproducibility \
   --repeat_count 7 \
   --terrain_type hill_city \
@@ -554,3 +517,7 @@ python -m test.analyze_prm_from_npz \
 - 连通分量断裂
 - 起终点接入失败
 - 还是边碰撞检查过严
+
+```bash
+python -m experiments.run_benchmark --terrain_type hill_city --planner_seed 2 --city_density 0.24 --seed_from 0 --seed_to 3 --out_root outputs --inflate 1 --rrt_iter 6000 --prm_samples 12000 --prm_k 48 --prm_max_edge_len 250 --prm_threat_weight 0.0 --moead_pop 160 --moead_min_gen 80 --moead_max_gen 1500 --mtoe_tol_fun 1e-5 --mtoe_confidence 0.99 --disable_mtoe_stop --K 30 --moead_T 16 --init_astar_ratio 0.25 --init_astar_threat_weight 1.8 --init_astar_max_paths 5 --init_astar_penalty_step 2.5 --init_backbone_threat_power 1.35 --init_backbone_clearance_weight 0.35 --init_backbone_lateral_bias 0.28 --init_backbone_time_budget_s 2.0 --init_backbone_coarse_min_factor 4 --init_stratified_ratio 0.55 --init_stratified_lateral_frac 0.30 --init_stratified_n_bands 5 --init_stratified_progress_jitter 0.08 --init_global_random_ratio 0.20 --weight_extreme_bias 0.20 --extreme_offspring_ratio 0.20 --extreme_potential_window 20 --extreme_min_extra_per_obj 1 --extreme_max_frac_per_obj 0.60 --local_search_interval 10 --local_search_elite_k 3 --local_search_attempts_per_obj 2 --archive_size 0 --archive_soft_limit 320 --archive_grid_bins 0 --archive_keep_extremes 1 --active_subproblem_ratio 0.80 --utility_update_interval 3 --utility_use_archive_density 0 --log_flush_every 10 --moead_debug
+```

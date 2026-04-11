@@ -8,10 +8,10 @@ import logging
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from collections import deque
+from collections import deque, defaultdict
 from scipy.stats import chi2
 from ..env.grid_env import GridEnv
-from ..env.collision import segment_collision, sampled_points_array
+from ..env.collision import segment_collision, sampled_points_array, sampled_polyline_points_array
 from ..models.evaluator import evaluate_path, EvalResult
 from ..models.path import shortcut_smooth, resample_polyline, densify_polyline_to_K
 from .a_star import astar
@@ -253,11 +253,13 @@ class Archive:
         grid_bins: int = 0,
         protect_extremes: bool = True,
         crowd_k: int = 5,
+        overflow_margin: int = 64,
     ):
         self.max_size = None if int(max_size) <= 0 else int(max_size)
         self.grid_bins = int(grid_bins)
         self.protect_extremes = bool(protect_extremes)
         self.crowd_k = int(max(1, crowd_k))
+        self.overflow_margin = int(max(1, overflow_margin)) if self.max_size is not None else 0
         self.items: List[Individual] = []
         self._objs = np.empty((0, 3), dtype=np.float64)
         self._keys: set[tuple[float, float, float]] = set()
@@ -312,7 +314,14 @@ class Archive:
         self._objs = np.insert(self._objs, pos, obj, axis=0)
         self._keys.add(key)
 
-        if self.max_size is not None and len(self.items) > self.max_size:
+        if self.max_size is not None and len(self.items) > (self.max_size + self.overflow_margin):
+            self._truncate()
+
+    def compact(self, force: bool = False):
+        if self.max_size is None:
+            return
+        limit = self.max_size if force else (self.max_size + self.overflow_margin)
+        if len(self.items) > limit:
             self._truncate()
 
     def density(self, obj: np.ndarray, k: int = 5) -> float:
@@ -598,19 +607,26 @@ def make_initial_population(
     global_random_ratio: float = 0.15,
     eval_sample_step: float = 0.75,
     smooth_collision_step: float = 0.75,
-) -> List[Individual]:
-    """Initialize population.
-
-    Strategy:
-      1) Use A* to obtain one (or a few) feasible backbone paths on the grid.
-      2) Create a portion of the population by jittering around the A* backbone.
-      3) Fill most of the remaining population with stratified corridor sampling
-         (structured randomness with better coverage than pure Gaussian noise).
-      4) Reserve a small tail for fully exploratory random paths.
-    """
+) -> Tuple[List[Individual], dict]:
+    """Initialize population and return a lightweight init profile."""
 
     rng = np.random.default_rng(seed)
     init: List[Individual] = []
+    profile = {
+        "astar_total_s": 0.0,
+        "astar_search_s": 0.0,
+        "astar_backbone_post_s": 0.0,
+        "astar_candidates": 0,
+        "astar_found": 0,
+        "astar_jitter_s": 0.0,
+        "astar_jitter_n": 0,
+        "stratified_s": 0.0,
+        "stratified_n": 0,
+        "global_random_s": 0.0,
+        "global_random_n": 0,
+        "repair_s": 0.0,
+        "eval_s": 0.0,
+    }
 
     pop = int(pop)
     K = int(K)
@@ -618,74 +634,72 @@ def make_initial_population(
     remaining_after_astar = max(0, pop - n_astar)
     n_stratified = int(np.clip(round(pop * float(stratified_ratio)), 0, remaining_after_astar))
     n_global_random = max(0, remaining_after_astar - n_stratified)
-    # optionally keep a larger exploratory tail when requested
     requested_random = int(np.clip(round(pop * float(global_random_ratio)), 0, remaining_after_astar))
     if requested_random > n_global_random:
         take = min(requested_random - n_global_random, n_stratified)
         n_stratified -= take
         n_global_random += take
 
-    # --- 1) Try to get multiple diverse A* path(s) as feasible backbones ---
     astar_paths: List[np.ndarray] = []
     if n_astar > 0:
-        # We generate alternatives via *path-penalty re-planning*:
-        #  - first run A* normally
-        #  - then add a penalty on cells visited by the found path (excluding endpoints)
-        #  - re-run A* with the penalty map to encourage a different corridor
-        # This is a lightweight k-shortest-ish approach and works well for
-        # narrow valleys/saddles where random init struggles.
+        t_astar_total0 = time.perf_counter()
 
-        max_paths = max(1, int(astar_max_paths))
-
-        # --- coarse-to-fine A* for large maps ---
-        # A* with dict-based gscore/came_from is very slow on 1600x2000.
-        # We downsample the occupancy/threat map (max-pool for obstacles) for seeding,
-        # then upsample back and repair with collision-checked smoothing.
         def _downsample_env_maxpool(src_env: GridEnv, factor: int) -> GridEnv:
+            """Build a coarse 2D planning grid for A* seeding.
+
+            Important: using `.any()` max-pooling on occupancy is far too conservative
+            on dense city maps. For example, when the fine-grid occupancy ratio is around
+            0.48, a 4x4 max-pool makes almost every coarse cell occupied, so A* spends a
+            long time proving failure and returns no seed at all. We instead use an
+            occupancy *fraction* threshold, which preserves wide free corridors while still
+            blocking truly dense obstacle regions.
+            """
             f = int(max(1, factor))
             if f == 1:
                 return src_env
-            occ = src_env.occupancy
+            occ = src_env.occupancy.astype(np.float32, copy=False)
             thr = src_env.threat.astype(np.float32, copy=False)
             H, W = occ.shape
             Hp = ((H + f - 1) // f) * f
             Wp = ((W + f - 1) // f) * f
-
             if Hp != H or Wp != W:
-                # pad obstacles as True to be safe (avoid creating fake corridors)
-                occ_pad = np.ones((Hp, Wp), dtype=bool)
+                occ_pad = np.ones((Hp, Wp), dtype=np.float32)
                 occ_pad[:H, :W] = occ
                 thr_pad = np.zeros((Hp, Wp), dtype=np.float32)
                 thr_pad[:H, :W] = thr
             else:
                 occ_pad = occ
                 thr_pad = thr
-
-            occ_ds = occ_pad.reshape(Hp // f, f, Wp // f, f).any(axis=(1, 3))
+            occ_frac = occ_pad.reshape(Hp // f, f, Wp // f, f).mean(axis=(1, 3))
             thr_ds = thr_pad.reshape(Hp // f, f, Wp // f, f).mean(axis=(1, 3))
+            occ_thr = 0.60 if f >= 4 else 0.75
+            occ_ds = occ_frac >= occ_thr
+            # Keep the coarse threat field aware of clutter so f2-oriented A* still avoids
+            # dense urban blocks even when they are not hard-blocked at the coarse scale.
+            thr_ds = thr_ds + 0.50 * occ_frac
             return GridEnv(occ_ds, thr_ds, resolution=float(src_env.resolution) * float(f))
 
         area = int(env.H) * int(env.W)
-        if area >= 1_000_000:
-            factors = (4, 2, 1)
-        elif area >= 300_000:
-            factors = (2, 1)
-        else:
-            factors = (1,)
+        factors = (4, 2, 1) if area >= 1_000_000 else ((2, 1) if area >= 300_000 else (1,))
+        max_paths = max(1, int(astar_max_paths))
 
         for f in factors:
             env_astar = _downsample_env_maxpool(env, int(f)) if int(f) > 1 else env
+            coarse_occ_ratio = float(np.mean(env_astar.occupancy))
+            # If the coarse grid is almost fully blocked, A* will only burn expansions and
+            # still fail. Skip that factor and move to a finer one.
+            if int(f) > 1 and coarse_occ_ratio >= 0.90:
+                continue
             start_astar = start / float(f) if int(f) > 1 else start
             goal_astar = goal / float(f) if int(f) > 1 else goal
-
-            # cap expansions by the *A* grid size
             max_exp = astar_max_expansions
             if max_exp is None:
-                max_exp = min(2_000_000, max(200_000, env_astar.H * env_astar.W))
-
+                scale = 0.35 if int(f) >= 4 else (0.60 if int(f) == 2 else 1.0)
+                max_exp = min(2_000_000, max(60_000, int(env_astar.H * env_astar.W * scale)))
             penalty_map = np.zeros_like(env_astar.threat, dtype=np.float32)
-
-            for k in range(max_paths):
+            for _k in range(max_paths):
+                profile["astar_candidates"] += 1
+                t_search0 = time.perf_counter()
                 res = astar(
                     env_astar,
                     start_astar,
@@ -694,71 +708,56 @@ def make_initial_population(
                     penalty_map=penalty_map,
                     allow_diagonal=True,
                     max_expansions=int(max_exp),
+                    heuristic_weight=(1.15 if int(f) > 1 else 1.05),
                 )
+                profile["astar_search_s"] += time.perf_counter() - t_search0
                 if res.path is None or len(res.path) < 2:
                     break
-
+                t_post0 = time.perf_counter()
                 raw = res.path.astype(np.float32)
-                # map back to full-res coordinates
                 if int(f) > 1:
                     raw[:, 0] *= float(f)
                     raw[:, 1] *= float(f)
-
-                raw3d = env.lift_path_to_3d(raw, start_z=float(start[2]) if len(start) >= 3 else None, goal_z=float(goal[2]) if len(goal) >= 3 else None)
-
-                # IMPORTANT: for large maps / narrow corridors,
-                # resample_polyline (equal-arc) may cut corners and turn a feasible grid path into an infeasible polyline.
-                # We first shortcut-smooth with collision checks (so every segment is truly collision-free),
-                # then densify while preserving vertices to exactly K points.
-                collision_fn = lambda p, q: segment_collision(env, p, q, step=smooth_collision_step)
-                base = _simplify_polyline_collision_aware(raw3d.copy(), K, collision_fn=collision_fn, rng=rng)
-                if len(base) > K:
-                    base = shortcut_smooth(base.copy(), n_try=800, rng=rng, collision_fn=collision_fn)
-                    base = _simplify_polyline_collision_aware(base, K, collision_fn=collision_fn, rng=rng)
-                if len(base) < K:
-                    base = densify_polyline_to_K(base, K)
-                base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
-                base = _repair_segment_clearance(env, base, step=0.5, clearance_margin=2.0)
-                base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+                raw3d = env.lift_path_to_3d(
+                    raw,
+                    start_z=float(start[2]) if len(start) >= 3 else None,
+                    goal_z=float(goal[2]) if len(goal) >= 3 else None,
+                )
+                if len(raw3d) > K:
+                    idx = np.linspace(0, len(raw3d) - 1, K).round().astype(np.int32)
+                    idx[0] = 0
+                    idx[-1] = len(raw3d) - 1
+                    base = raw3d[idx].astype(np.float32)
+                elif len(raw3d) < K:
+                    base = densify_polyline_to_K(raw3d, K)
+                else:
+                    base = raw3d.astype(np.float32)
+                base = _clip_bounds(env, base)
+                if base.shape[1] >= 3:
+                    base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=2)
                 base[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
                 base[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
-                er = evaluate_path(env, base, sample_step=eval_sample_step)
-                if not er.feasible:
-                    base = densify_polyline_to_K(raw3d, K)
-                    base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=8)
-                    base = _repair_segment_clearance(env, base, step=0.5, clearance_margin=2.0)
-                    base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=8)
-                    base[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
-                    base[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
-                    er = evaluate_path(env, base, sample_step=eval_sample_step)
-
-                # still infeasible -> skip this backbone
-                if not er.feasible:
-                    # update penalty and continue trying another corridor
-                    pass
-                else:
-                    astar_paths.append(base)
-
-                # add penalty along found path to diversify (in the A* grid coords)
+                profile["astar_backbone_post_s"] += time.perf_counter() - t_post0
+                astar_paths.append(base)
+                profile["astar_found"] += 1
                 cells = res.path.astype(np.int32)
                 if len(cells) > 2:
-                    cells = cells[1:-1]  # exclude start/goal
-                for x, y in cells:
-                    if 0 <= y < penalty_map.shape[0] and 0 <= x < penalty_map.shape[1]:
-                        penalty_map[y, x] += float(astar_penalty_step)
-
+                    cells = cells[1:-1]
+                for xx, yy in cells:
+                    if 0 <= yy < penalty_map.shape[0] and 0 <= xx < penalty_map.shape[1]:
+                        penalty_map[yy, xx] += float(astar_penalty_step)
             if len(astar_paths) > 0:
                 break
-# de-dup very similar backbones
+        profile["astar_total_s"] = time.perf_counter() - t_astar_total0
         uniq: List[np.ndarray] = []
         for p in astar_paths:
             if not any(np.allclose(p, q, atol=1e-3, rtol=0.0) for q in uniq):
                 uniq.append(p)
         astar_paths = uniq
 
-    # --- 2) Build A* jittered individuals ---
     if astar_paths:
         for t in range(n_astar):
+            t0 = time.perf_counter()
             base = astar_paths[t % len(astar_paths)]
             x = base.copy()
             noise = rng.normal(0.0, float(astar_jitter_sigma), size=x.shape).astype(np.float32)
@@ -773,29 +772,37 @@ def make_initial_population(
             x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
             x[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
             x[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
+            t_r0 = time.perf_counter()
             x = repair_light(env, x, rng, tries=8)
+            profile["repair_s"] += time.perf_counter() - t_r0
+            t_e0 = time.perf_counter()
             er = evaluate_path(env, x, sample_step=eval_sample_step)
+            profile["eval_s"] += time.perf_counter() - t_e0
             init.append(Individual(x=x, er=er))
+            profile["astar_jitter_s"] += time.perf_counter() - t0
+            profile["astar_jitter_n"] += 1
 
-    # --- 3) Stratified corridor sampling: random but more spatially uniform ---
     for _ in range(n_stratified):
+        t0 = time.perf_counter()
         x = _build_stratified_candidate(
-            env,
-            start,
-            goal,
-            K,
-            rng,
+            env, start, goal, K, rng,
             lateral_frac=float(stratified_lateral_frac),
             n_bands=int(stratified_n_bands),
             progress_jitter=float(stratified_progress_jitter),
             global_mix_prob=0.10,
         )
+        t_r0 = time.perf_counter()
         x = repair_light(env, x, rng, tries=6)
+        profile["repair_s"] += time.perf_counter() - t_r0
+        t_e0 = time.perf_counter()
         er = evaluate_path(env, x, sample_step=eval_sample_step)
+        profile["eval_s"] += time.perf_counter() - t_e0
         init.append(Individual(x=x, er=er))
+        profile["stratified_s"] += time.perf_counter() - t0
+        profile["stratified_n"] += 1
 
-    # --- 4) Small exploratory tail: keep some fully random / noisy individuals ---
     while len(init) < pop:
+        t0 = time.perf_counter()
         x = np.linspace(start, goal, K).astype(np.float32)
         noise = rng.normal(0.0, 3.0, size=x.shape).astype(np.float32)
         if x.shape[1] >= 3:
@@ -809,11 +816,17 @@ def make_initial_population(
         x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
         x[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
         x[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
+        t_r0 = time.perf_counter()
         x = repair_light(env, x, rng, tries=6)
+        profile["repair_s"] += time.perf_counter() - t_r0
+        t_e0 = time.perf_counter()
         er = evaluate_path(env, x, sample_step=eval_sample_step)
+        profile["eval_s"] += time.perf_counter() - t_e0
         init.append(Individual(x=x, er=er))
+        profile["global_random_s"] += time.perf_counter() - t0
+        profile["global_random_n"] += 1
 
-    return init[:pop]
+    return init[:pop], profile
 
 
 def crossover(rng: np.random.Generator, p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
@@ -883,17 +896,26 @@ def repair_light(env: GridEnv, x: np.ndarray, rng: np.random.Generator, tries: i
     Key idea:
       - keep initialization heavy and robust
       - make offspring repair much lighter, because it runs pop*n_gen times
+      - first detect clearly bad interior waypoints in a vectorized way
     """
     y = _clip_bounds(env, x)
     D = y.shape[1]
-    # only fix points that are clearly invalid
-    for i in range(1, len(y) - 1):
+
+    if len(y) > 2:
+        ix = np.rint(y[:, 0]).astype(np.int32)
+        iy = np.rint(y[:, 1]).astype(np.int32)
+        ix = np.clip(ix, 0, env.W - 1)
+        iy = np.clip(iy, 0, env.H - 1)
         if D >= 3:
-            bad = not env.is_free_point(y[i], clearance=env.min_clearance + 1.5)
+            safe_z = env.height[iy, ix] + (env.min_clearance + 1.5)
+            bad_mask = y[:, 2] < safe_z
         else:
-            bad = env.is_occupied(int(round(y[i, 0])), int(round(y[i, 1])))
-        if not bad:
-            continue
+            bad_mask = env.occupancy[iy, ix]
+        bad_idx = (np.flatnonzero(bad_mask[1:-1]) + 1).tolist()
+    else:
+        bad_idx = []
+
+    for i in bad_idx:
         for _ in range(int(tries)):
             cand = y[i].copy()
             cand[:2] += rng.normal(0.0, 1.5, size=(2,)).astype(np.float32)
@@ -902,15 +924,33 @@ def repair_light(env: GridEnv, x: np.ndarray, rng: np.random.Generator, tries: i
                 cand[2] = max(base_z, float(cand[2]) + float(rng.normal(1.5, 1.0)))
             cand = _clip_bounds(env, cand[None, :])[0]
             if D >= 3:
-                good = env.is_free_point(cand, clearance=env.min_clearance + 1.5)
+                cix = int(np.clip(round(float(cand[0])), 0, env.W - 1))
+                ciy = int(np.clip(round(float(cand[1])), 0, env.H - 1))
+                good = float(cand[2]) >= float(env.height[ciy, cix] + env.min_clearance + 1.5)
             else:
                 good = not env.is_occupied(int(round(cand[0])), int(round(cand[1])))
             if good:
                 y[i] = cand
                 break
     if D >= 3:
-        y = _repair_segment_clearance(env, y, step=0.75, clearance_margin=1.5)
-        y = _enforce_altitude_profile(env, y, clearance_margin=1.5, max_pitch_deg=35.0, n_pass=3)
+        safe_z = env.height[iy, ix] + (env.min_clearance + 1.5)
+        needs_segment_repair = len(bad_idx) > 0
+        if not needs_segment_repair:
+            dxy = np.linalg.norm(np.diff(y[:, :2], axis=0), axis=1)
+            dz = np.abs(np.diff(y[:, 2]))
+            pitch = np.arctan2(dz, np.maximum(1e-6, dxy)) if len(y) >= 2 else np.zeros((0,), dtype=np.float32)
+            if np.any(pitch > np.deg2rad(35.0)):
+                needs_segment_repair = True
+            else:
+                coarse_pts = sampled_polyline_points_array(y, step=max(2.0, 4.0 * float(env.resolution)), xy_resolution=env.resolution)
+                cix = np.clip(np.rint(coarse_pts[:, 0]).astype(np.int32), 0, env.W - 1)
+                ciy = np.clip(np.rint(coarse_pts[:, 1]).astype(np.int32), 0, env.H - 1)
+                req = env.height[ciy, cix] + env.min_clearance + 1.5
+                if bool(np.any(coarse_pts[:, 2] < req)):
+                    needs_segment_repair = True
+        if needs_segment_repair:
+            y = _repair_segment_clearance(env, y, step=0.75, clearance_margin=1.5)
+            y = _enforce_altitude_profile(env, y, clearance_margin=1.5, max_pitch_deg=35.0, n_pass=3)
     return y.astype(np.float32)
 
 
@@ -1111,6 +1151,151 @@ def _current_subproblem_scalar_values(pop_inds: List[Individual], W: np.ndarray,
     return cur_g
 
 
+
+def _resample_polyline_xy(path: np.ndarray, n_samples: int) -> np.ndarray:
+    path = np.asarray(path, dtype=np.float64)
+    if path.ndim != 2 or len(path) == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    xy = path[:, :2]
+    if len(xy) == 1:
+        return np.repeat(xy, max(1, int(n_samples)), axis=0)
+    n_samples = int(max(2, n_samples))
+    seg = xy[1:] - xy[:-1]
+    seglen = np.linalg.norm(seg, axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seglen)])
+    total = float(cum[-1])
+    if total <= 1e-12:
+        return np.repeat(xy[:1], n_samples, axis=0)
+    targets = np.linspace(0.0, total, n_samples)
+    out = np.empty((n_samples, 2), dtype=np.float64)
+    j = 0
+    for i, t in enumerate(targets):
+        while j + 1 < len(cum) and cum[j + 1] < t:
+            j += 1
+        if j + 1 >= len(cum):
+            out[i] = xy[-1]
+            continue
+        denom = max(1e-12, cum[j + 1] - cum[j])
+        alpha = float((t - cum[j]) / denom)
+        out[i] = (1.0 - alpha) * xy[j] + alpha * xy[j + 1]
+    return out
+
+
+def _path_basin_signature(
+    path: np.ndarray,
+    start: np.ndarray,
+    goal: np.ndarray,
+    *,
+    n_bands: int = 7,
+    n_samples: int = 9,
+) -> Optional[str]:
+    path = np.asarray(path, dtype=np.float64)
+    if path.ndim != 2 or len(path) < 2:
+        return None
+    pts = _resample_polyline_xy(path, n_samples=max(3, int(n_samples)))
+    s = np.asarray(start[:2], dtype=np.float64)
+    g = np.asarray(goal[:2], dtype=np.float64)
+    d = g - s
+    L = float(np.linalg.norm(d))
+    if L <= 1e-9:
+        return None
+    t = d / L
+    n = np.array([-t[1], t[0]], dtype=np.float64)
+    half_width = max(6.0, 0.22 * L)
+    signed = (pts - s[None, :]) @ n
+    u = np.clip(signed / half_width, -0.999, 0.999)
+    n_bands = int(max(3, n_bands))
+    bands = np.floor((u + 1.0) * 0.5 * n_bands).astype(np.int32)
+    bands = np.clip(bands, 0, n_bands - 1)
+    return '-'.join(str(int(v)) for v in bands.tolist())
+
+
+def _best_feasible_individual(pop_inds: List[Individual], archive: "Archive") -> Optional[Individual]:
+    best = None
+    best_f2 = None
+    for it in pop_inds:
+        if not it.er.feasible:
+            continue
+        v = float(it.er.obj[1])
+        if best is None or v < best_f2:
+            best = it
+            best_f2 = v
+    for it in getattr(archive, 'items', []):
+        if not it.er.feasible:
+            continue
+        v = float(it.er.obj[1])
+        if best is None or v < best_f2:
+            best = it
+            best_f2 = v
+    return best
+
+
+def _basin_probe_from_state(
+    cur_best_ind: Optional[Individual],
+    *,
+    start: np.ndarray,
+    goal: np.ndarray,
+    basin_registry: dict,
+    basin_best_f2: dict,
+    basin_histories: dict,
+    basin_visit_counts: dict,
+    distinct_sequence: deque,
+    n_bands: int,
+    n_samples: int,
+    stagnation_window: int,
+    f2_tol_abs: float,
+    f2_tol_rel: float,
+    reference_f2: Optional[float],
+    ref_gap_tol: float,
+    min_distinct: int,
+) -> Optional[dict]:
+    if cur_best_ind is None or (not cur_best_ind.er.feasible):
+        return None
+    sig = _path_basin_signature(cur_best_ind.x, start, goal, n_bands=n_bands, n_samples=n_samples)
+    if sig is None:
+        return None
+    entered_new = sig not in basin_registry
+    if entered_new:
+        basin_registry[sig] = int(len(basin_registry))
+    basin_id = int(basin_registry[sig])
+    cur_f2 = float(cur_best_ind.er.obj[1])
+    prev_best = basin_best_f2.get(basin_id)
+    basin_best = cur_f2 if prev_best is None else min(float(prev_best), cur_f2)
+    basin_best_f2[basin_id] = basin_best
+    hist = basin_histories[basin_id]
+    hist.append(basin_best)
+    basin_visit_counts[basin_id] += 1
+    if not distinct_sequence or distinct_sequence[-1] != basin_id:
+        distinct_sequence.append(basin_id)
+    hist_vals = list(hist)
+    span = float(max(hist_vals) - min(hist_vals)) if hist_vals else 0.0
+    eps = max(float(f2_tol_abs), abs(basin_best) * float(f2_tol_rel))
+    basin_plateau = bool(len(hist) >= int(max(3, stagnation_window)) and span <= eps)
+    reference_gap = None
+    if reference_f2 is not None and np.isfinite(reference_f2):
+        denom = max(1.0, abs(float(reference_f2)))
+        reference_gap = float((basin_best - float(reference_f2)) / denom)
+    action = 'normal'
+    if basin_plateau:
+        enough_distinct = len(set(distinct_sequence)) >= int(max(1, min_distinct))
+        close_to_ref = (reference_gap is None) or (reference_gap <= float(ref_gap_tol))
+        action = 'stop_candidate' if (enough_distinct and close_to_ref) else 'escape'
+    return {
+        'signature': sig,
+        'basin_id': basin_id,
+        'entered_new_basin': bool(entered_new),
+        'current_best_f2': cur_f2,
+        'basin_best_f2': float(basin_best),
+        'basin_hist_len': int(len(hist)),
+        'basin_span': float(span),
+        'basin_plateau': bool(basin_plateau),
+        'reference_f2': (None if reference_f2 is None or not np.isfinite(reference_f2) else float(reference_f2)),
+        'reference_gap': reference_gap,
+        'distinct_basins_seen': int(len(set(distinct_sequence))),
+        'visit_count': int(basin_visit_counts[basin_id]),
+        'action': action,
+    }
+
 def _mtoe_stop_decision(
     mtoe_hist: deque[float],
     *,
@@ -1244,31 +1429,143 @@ def _cheap_candidate_precheck(
     if len(y) <= 1:
         return False
     seg = y[1:] - y[:-1]
-    seglen = np.linalg.norm(seg[:, :2], axis=1)
-    if np.any(seglen < 1e-3):
+    seglen_xy = np.linalg.norm(seg[:, :2], axis=1)
+    if np.any(seglen_xy < 1e-3):
         return False
+
     # absurdly long zig-zag offspring are usually wasted evaluations.
-    path_len = float(np.sum(np.linalg.norm(seg, axis=1)))
+    path_len = float(np.sum(np.linalg.norm(seg, axis=1), dtype=np.float64))
     chord = float(np.linalg.norm(y[-1] - y[0]))
     if path_len > max(50.0, 4.0 * chord):
         return False
+
     if parent is not None:
         p = np.asarray(parent, dtype=np.float32)
-        if p.shape == y.shape and float(np.mean(np.linalg.norm(y - p, axis=1))) < 0.15:
+        if p.shape == y.shape and float(np.mean(np.linalg.norm(y - p, axis=1), dtype=np.float64)) < 0.15:
             return False
-    threat_samples = []
-    for p in y[1:-1:max(1, len(y)//6)]:
-        ix = int(np.clip(round(float(p[0])), 0, env.W - 1))
-        iy = int(np.clip(round(float(p[1])), 0, env.H - 1))
-        threat_samples.append(float(env.threat[iy, ix]))
-    if threat_samples:
-        if threat_mean is None:
-            threat_mean = float(np.mean(env.threat))
-        if threat_std is None:
-            threat_std = float(np.std(env.threat))
-        if np.mean(threat_samples) > float(threat_mean + 2.5 * threat_std):
+
+    if y.shape[1] >= 3:
+        if np.any(y[:, 2] < env.z_min) or np.any(y[:, 2] > env.z_max):
             return False
+        dxy = np.maximum(1e-6, seglen_xy)
+        pitch = np.arctan2(np.abs(seg[:, 2]), dxy)
+        if np.any(pitch > np.deg2rad(45.0)):
+            return False
+
+    # coarse polyline sampling: much cheaper than full eval, but catches obvious OOB / clearance failures.
+    coarse_step = max(2.0, 4.0 * float(env.resolution))
+    pts = sampled_polyline_points_array(y, step=coarse_step, xy_resolution=env.resolution)
+    ix = np.rint(pts[:, 0]).astype(np.int32)
+    iy = np.rint(pts[:, 1]).astype(np.int32)
+    oob = (ix < 0) | (ix >= env.W) | (iy < 0) | (iy >= env.H)
+    if bool(np.any(oob)):
+        return False
+    ix = np.clip(ix, 0, env.W - 1)
+    iy = np.clip(iy, 0, env.H - 1)
+
+    if y.shape[1] >= 3:
+        safe = env.height[iy, ix] + env.min_clearance
+        miss_ratio = float(np.mean(pts[:, 2] < safe)) if len(pts) > 0 else 0.0
+        if miss_ratio > 0.10:
+            return False
+        threat_vals = env.threat[iy, ix]
+    else:
+        if bool(np.any(env.occupancy[iy, ix])):
+            return False
+        threat_vals = env.threat[iy, ix]
+
+    if threat_mean is None:
+        threat_mean = float(np.mean(env.threat))
+    if threat_std is None:
+        threat_std = float(np.std(env.threat))
+    if float(np.mean(threat_vals, dtype=np.float64)) > float(threat_mean + 2.5 * threat_std):
+        return False
     return True
+
+
+def _coarse_path_code(path: np.ndarray, n_samples: int = 9) -> np.ndarray:
+    p = np.asarray(path, dtype=np.float32)
+    if len(p) <= 1:
+        return np.zeros((n_samples, 2), dtype=np.int32)
+    idx = np.linspace(0, len(p) - 1, n_samples).round().astype(np.int32)
+    idx[0] = 0
+    idx[-1] = len(p) - 1
+    q = p[idx, :2]
+    return np.rint(q / 8.0).astype(np.int32)
+
+
+def _path_distance(a: np.ndarray, b: np.ndarray) -> float:
+    ca = _coarse_path_code(a)
+    cb = _coarse_path_code(b)
+    return float(np.mean(np.linalg.norm(ca.astype(np.float32) - cb.astype(np.float32), axis=1)))
+
+
+def _pick_diverse_partner(pool: List[Individual], base: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    if not pool:
+        return np.asarray(base, dtype=np.float32)
+    if len(pool) == 1:
+        return pool[0].x.astype(np.float32)
+    cand_idx = rng.choice(len(pool), size=min(8, len(pool)), replace=False)
+    best_j = int(cand_idx[0])
+    best_d = -1.0
+    for jj in cand_idx:
+        d = _path_distance(base, pool[int(jj)].x)
+        if d > best_d:
+            best_d = d
+            best_j = int(jj)
+    return pool[best_j].x.astype(np.float32)
+
+
+def _splice_with_candidate(base: np.ndarray, donor: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    y = np.asarray(base, dtype=np.float32).copy()
+    z = np.asarray(donor, dtype=np.float32)
+    if len(y) <= 4 or y.shape != z.shape:
+        return y
+    a = int(rng.integers(1, max(2, len(y) // 3)))
+    b = int(rng.integers(max(a + 1, len(y) // 2), len(y) - 1))
+    y[a:b] = z[a:b]
+    y[0] = base[0]
+    y[-1] = base[-1]
+    return y.astype(np.float32)
+
+
+def _make_escape_candidate(
+    env: GridEnv,
+    start: np.ndarray,
+    goal: np.ndarray,
+    K: int,
+    rng: np.random.Generator,
+    pool: List[Individual],
+    archive: Archive,
+    *,
+    sigma: float = 8.0,
+) -> np.ndarray:
+    sources: List[Individual] = []
+    if archive.items:
+        sources.extend(archive.items[-min(len(archive.items), 24):])
+    sources.extend(pool)
+    if not sources:
+        x = _build_stratified_candidate(env, start, goal, K, rng, lateral_frac=0.45, n_bands=7, progress_jitter=0.14, global_mix_prob=0.25)
+        return repair_light(env, x, rng, tries=8)
+
+    if any(it.er.feasible for it in sources):
+        feasible_sources = [it for it in sources if it.er.feasible]
+    else:
+        feasible_sources = sources
+    base_ind = feasible_sources[int(rng.integers(0, len(feasible_sources)))]
+    base = base_ind.x.astype(np.float32)
+    donor = _pick_diverse_partner(sources, base, rng)
+    child = _splice_with_candidate(base, donor, rng)
+    child = mutate(rng, child, sigma=float(sigma), p_mut=0.55)
+    if rng.random() < 0.65:
+        alt = _build_stratified_candidate(env, start, goal, K, rng, lateral_frac=0.50, n_bands=7, progress_jitter=0.16, global_mix_prob=0.30)
+        child = _splice_with_candidate(child, alt, rng)
+    child[0] = start
+    child[-1] = goal
+    child = repair_light(env, child, rng, tries=8)
+    if child.shape[1] >= 3:
+        child = _enforce_altitude_profile(env, child, clearance_margin=1.5, max_pitch_deg=35.0, n_pass=3)
+    return child.astype(np.float32)
 
 
 def better_feasible(a: EvalResult, b: EvalResult) -> bool:
@@ -1334,10 +1631,27 @@ def moead(
     utility_update_interval: int = 3,
     utility_use_archive_density: bool = False,
     log_flush_every: int = 10,
+    global_mating_prob_base: float = 0.10,
+    global_mating_prob_stall: float = 0.35,
+    archive_parent_prob: float = 0.20,
+    escape_stall_window: int = 12,
+    escape_injections: int = 6,
+    escape_large_mut_sigma: float = 8.0,
     moead_min_gen: int = 20,
     moead_max_gen: Optional[int] = None,
     mtoe_tol_fun: float = 1e-5,
     mtoe_confidence: float = 0.99,
+    disable_mtoe_stop: bool = False,
+    basin_shadow_enable: bool = True,
+    basin_band_count: int = 7,
+    basin_signature_samples: int = 9,
+    basin_stagnation_window: int = 10,
+    basin_f2_tol_abs: float = 1.0,
+    basin_f2_tol_rel: float = 0.01,
+    basin_ref_gap_tol: float = 0.08,
+    basin_min_distinct: int = 2,
+    basin_escape_injections: int = 0,
+    reference_f2: Optional[float] = None,
 ):
     """
     MOEA/D（Tchebycheff 标量化 + 外部档案）
@@ -1367,14 +1681,31 @@ def moead(
         moead_max_gen = moead_min_gen
     mtoe_tol_fun = float(max(1e-12, mtoe_tol_fun))
     mtoe_confidence = float(np.clip(mtoe_confidence, 0.0, 0.999999999))
+    disable_mtoe_stop = bool(disable_mtoe_stop)
+    basin_shadow_enable = bool(basin_shadow_enable)
+    basin_band_count = int(max(3, basin_band_count))
+    basin_signature_samples = int(max(3, basin_signature_samples))
+    basin_stagnation_window = int(max(3, basin_stagnation_window))
+    basin_f2_tol_abs = float(max(0.0, basin_f2_tol_abs))
+    basin_f2_tol_rel = float(max(0.0, basin_f2_tol_rel))
+    basin_ref_gap_tol = float(max(0.0, basin_ref_gap_tol))
+    basin_min_distinct = int(max(1, basin_min_distinct))
+    basin_escape_injections = int(max(0, basin_escape_injections))
+    reference_f2 = None if reference_f2 is None or (not np.isfinite(reference_f2)) else float(reference_f2)
     threat_mean = float(np.mean(env.threat))
     threat_std = float(np.std(env.threat))
+    global_mating_prob_base = float(np.clip(global_mating_prob_base, 0.0, 1.0))
+    global_mating_prob_stall = float(np.clip(global_mating_prob_stall, 0.0, 1.0))
+    archive_parent_prob = float(np.clip(archive_parent_prob, 0.0, 1.0))
+    escape_stall_window = int(max(3, escape_stall_window))
+    escape_injections = int(max(0, escape_injections))
+    escape_large_mut_sigma = float(max(1.0, escape_large_mut_sigma))
     M = 3
     W = uniform_weights(M, pop, seed=seed, extreme_bias=float(weight_extreme_bias))
     B = build_neighbors(W, T=T)
 
     t_init0 = time.perf_counter()
-    pop_inds = make_initial_population(
+    pop_inds, init_profile = make_initial_population(
         env,
         start,
         goal,
@@ -1451,17 +1782,25 @@ def moead(
     mtoe_window = 10
     mtoe_debug_tail: deque[dict] = deque(maxlen=25)
     mtoe_tests_run = 0
+    shadow_stop_events: list[dict] = []
+    basin_debug_tail: deque[dict] = deque(maxlen=50)
+    basin_registry: dict[str, int] = {}
+    basin_best_f2: dict[int, float] = {}
+    basin_histories = defaultdict(lambda: deque(maxlen=max(3, int(basin_stagnation_window))))
+    basin_visit_counts = defaultdict(int)
+    basin_distinct_sequence: deque[int] = deque(maxlen=max(10, int(basin_stagnation_window) * 4))
 
     if logger is not None:
         st = _pop_stats(pop_inds)
         logger.info(
-            "[start] env(H=%d,W=%d) seed=%d n_gen=%d pop=%d K=%d T=%d max_turn_deg=%.1f "
+            "[start] env(H=%d,W=%d) seed=%d planner_seed=%d n_gen=%d pop=%d K=%d T=%d max_turn_deg=%.1f "
             "eval_step=%.3f smooth_step=%.3f init_s=%.3f init_feasible=%d/%d (%.1f%%) "
             "init_min_viol=%.3f init_mean_viol=%.3f init_archive=%d "
             "A* seeding: ratio=%.3f max_paths=%d penalty_step=%.3f threat_w=%.3f jitter=%.3f | "
-            "stratified: ratio=%.3f lateral_frac=%.3f bands=%d progress_jitter=%.3f global_random=%.3f | weight_extreme_bias=%.3f | extra_ratio=%.3f potential_W=%d ls_interval=%d ls_elite=%d ls_attempts=%d active_ratio=%.3f utility_update_interval=%d utility_archive_density=%s log_flush_every=%d archive_cap=%s | MTOE(mode=best_so_far_delta window=%d min_gen=%d max_gen=%d tol_fun=%.3e confidence=%.4f)",
+            "stratified: ratio=%.3f lateral_frac=%.3f bands=%d progress_jitter=%.3f global_random=%.3f | weight_extreme_bias=%.3f | extra_ratio=%.3f potential_W=%d ls_interval=%d ls_elite=%d ls_attempts=%d active_ratio=%.3f utility_update_interval=%d utility_archive_density=%s log_flush_every=%d archive_cap=%s | MTOE(mode=best_so_far_delta window=%d min_gen=%d max_gen=%d tol_fun=%.3e confidence=%.4f disable_stop=%s) | BasinShadow(enable=%s bands=%d samples=%d window=%d f2_tol_abs=%.3f f2_tol_rel=%.4f ref_gap_tol=%.4f min_distinct=%d basin_escape_inj=%d ref_f2=%s)",
             int(env.H),
             int(env.W),
+            int(seed),
             int(seed),
             int(n_gen),
             int(pop),
@@ -1503,12 +1842,56 @@ def moead(
             int(moead_max_gen),
             float(mtoe_tol_fun),
             float(mtoe_confidence),
+            str(bool(disable_mtoe_stop)),
+            str(bool(basin_shadow_enable)),
+            int(basin_band_count),
+            int(basin_signature_samples),
+            int(basin_stagnation_window),
+            float(basin_f2_tol_abs),
+            float(basin_f2_tol_rel),
+            float(basin_ref_gap_tol),
+            int(basin_min_distinct),
+            int(basin_escape_injections),
+            ("None" if reference_f2 is None else f"{float(reference_f2):.6f}"),
+        )
+        init_total = float(init_s)
+        init_other = max(0.0, init_total - float(init_profile.get("astar_total_s", 0.0)) - float(init_profile.get("stratified_s", 0.0)) - float(init_profile.get("global_random_s", 0.0)))
+        logger.info(
+            "[init] total=%.3fs astar_total=%.3fs (search=%.3fs backbone_post=%.3fs cand=%d found=%d) astar_jitter=%.3fs (n=%d) stratified=%.3fs (n=%d) global_random=%.3fs (n=%d) repair=%.3fs eval=%.3fs other=%.3fs",
+            init_total,
+            float(init_profile.get("astar_total_s", 0.0)),
+            float(init_profile.get("astar_search_s", 0.0)),
+            float(init_profile.get("astar_backbone_post_s", 0.0)),
+            int(init_profile.get("astar_candidates", 0)),
+            int(init_profile.get("astar_found", 0)),
+            float(init_profile.get("astar_jitter_s", 0.0)),
+            int(init_profile.get("astar_jitter_n", 0)),
+            float(init_profile.get("stratified_s", 0.0)),
+            int(init_profile.get("stratified_n", 0)),
+            float(init_profile.get("global_random_s", 0.0)),
+            int(init_profile.get("global_random_n", 0)),
+            float(init_profile.get("repair_s", 0.0)),
+            float(init_profile.get("eval_s", 0.0)),
+            float(init_other),
+        )
+        denom = max(1e-9, init_total)
+        logger.info(
+            "[init_ratio] astar_total=%.1f%% astar_jitter=%.1f%% stratified=%.1f%% global_random=%.1f%% repair=%.1f%% eval=%.1f%%",
+            100.0 * float(init_profile.get("astar_total_s", 0.0)) / denom,
+            100.0 * float(init_profile.get("astar_jitter_s", 0.0)) / denom,
+            100.0 * float(init_profile.get("stratified_s", 0.0)) / denom,
+            100.0 * float(init_profile.get("global_random_s", 0.0)) / denom,
+            100.0 * float(init_profile.get("repair_s", 0.0)) / denom,
+            100.0 * float(init_profile.get("eval_s", 0.0)) / denom,
         )
 
     mtoe_hist: deque[float] = deque(maxlen=mtoe_window)
     stop_reason = "max_gen"
     stop_info = None
     actual_gens = 0
+    best_f2_so_far = None
+    best_f2_no_improve = 0
+    last_escape_gen = -10**9
 
     for gen in range(int(moead_max_gen)):
         gen_t0 = time.perf_counter()
@@ -1516,6 +1899,12 @@ def moead(
         gen_smooth_s = 0.0
         gen_neighbor_s = 0.0
         gen_repair_s = 0.0
+        gen_eval_count = 0
+        gen_precheck_reject = 0
+        gen_regular_eval = 0
+        gen_extra_eval = 0
+        gen_ls_eval = 0
+        gen_escape_eval = 0
         gen_n_smooth_in = 0
         gen_n_smooth_out = 0
         gen_coll_calls0 = coll_calls
@@ -1523,6 +1912,8 @@ def moead(
         gen_extreme_alloc = np.zeros(3, dtype=np.int32)
         gen_ls_success = np.zeros(3, dtype=np.int32)
         gen_ls_attempts = np.zeros(3, dtype=np.int32)
+        gen_escape_attempts = 0
+        gen_escape_success = 0
 
         def _update_neighbors_for_child(child: np.ndarray, er_child: EvalResult, center_idx: int):
             nonlocal z, gen_neighbor_s, replace_counts
@@ -1558,6 +1949,7 @@ def moead(
                 archive.add(Individual(x=child, er=er_child))
             return local_repl
 
+        archive.compact(force=False)
         # subproblem-level utility update + active subproblem sampling
         phase = float(gen) / max(1.0, float(n_gen - 1))
         if gen == 0 or (gen % utility_update_interval) == 0:
@@ -1590,9 +1982,22 @@ def moead(
         for i in active_idx:
             i = int(i)
             nb = B[i]
-            pidx = rng.choice(nb, size=2, replace=False)
-            p1 = pop_inds[int(pidx[0])].x
-            p2 = pop_inds[int(pidx[1])].x
+            use_global = False
+            stall_boost = 0.0 if stall_p75 <= 0 else float(np.clip((stall[i] - stall_med) / max(1e-6, stall_p75 - stall_med + 1e-6), 0.0, 1.0))
+            p_global = min(0.95, global_mating_prob_base + global_mating_prob_stall * stall_boost)
+            if rng.random() < p_global:
+                use_global = True
+            if use_global:
+                pidx = rng.choice(pop, size=2, replace=False)
+                p1 = pop_inds[int(pidx[0])].x
+                if archive.items and rng.random() < archive_parent_prob:
+                    p2 = archive.items[int(rng.integers(0, len(archive.items)))].x
+                else:
+                    p2 = _pick_diverse_partner(pop_inds, p1, rng)
+            else:
+                pidx = rng.choice(nb, size=2, replace=False)
+                p1 = pop_inds[int(pidx[0])].x
+                p2 = pop_inds[int(pidx[1])].x
 
             child = crossover(rng, p1, p2)
             sigma = 2.0 if utility[i] >= utility_med else 3.2
@@ -1614,12 +2019,15 @@ def moead(
             child[0] = start
             child[-1] = goal
             if not _cheap_candidate_precheck(env, child, parent=p1, threat_mean=threat_mean, threat_std=threat_std):
+                gen_precheck_reject += 1
                 continue
 
             t_e0 = time.perf_counter()
             er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
             gen_eval_s += (time.perf_counter() - t_e0)
             n_eval += 1
+            gen_eval_count += 1
+            gen_regular_eval += 1
             _update_neighbors_for_child(child, er_child, i)
 
         # extra offspring with dynamic resource allocation across objective extremes
@@ -1653,17 +2061,24 @@ def moead(
                     child[0] = start
                     child[-1] = goal
                     if not _cheap_candidate_precheck(env, child, parent=parent.x, threat_mean=threat_mean, threat_std=threat_std):
+                        gen_precheck_reject += 1
                         continue
                     t_e0 = time.perf_counter()
                     er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
                     gen_eval_s += (time.perf_counter() - t_e0)
                     n_eval += 1
+                    gen_eval_count += 1
+                    gen_extra_eval += 1
                     _update_neighbors_for_child(child, er_child, extreme_centers[m])
 
         # periodic directed local search on elite solutions
         if int(local_search_interval) > 0 and (((gen + 1) % int(local_search_interval)) == 0):
             extreme_centers = [int(np.argmax(W[:, m])) for m in range(3)]
             for m in range(3):
+                center_idx = int(extreme_centers[m])
+                ls_worth_try = (stall[center_idx] >= stall_p60) or (gen < max(10, int(local_search_interval))) or (ls_success_ema[m] >= 0.05) or (ls_improve_ema[m] > 1e-6)
+                if not ls_worth_try:
+                    continue
                 elites = _elite_by_obj(pop_inds, m, k=max(1, int(local_search_elite_k)))
                 for attempt in range(min(int(local_search_attempts_per_obj), len(elites))):
                     parent = elites[attempt]
@@ -1683,11 +2098,14 @@ def moead(
                     child[0] = start
                     child[-1] = goal
                     if not _cheap_candidate_precheck(env, child, parent=parent.x, threat_mean=threat_mean, threat_std=threat_std):
+                        gen_precheck_reject += 1
                         continue
                     t_e0 = time.perf_counter()
                     er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
                     gen_eval_s += (time.perf_counter() - t_e0)
                     n_eval += 1
+                    gen_eval_count += 1
+                    gen_ls_eval += 1
                     gen_ls_attempts[m] += 1
                     improved = False
                     if er_child.feasible and parent.er.feasible and float(er_child.obj[m]) + 1e-9 < float(parent.er.obj[m]):
@@ -1706,13 +2124,76 @@ def moead(
 
         cur_best = _best_feasible_obj(pop_inds)
         if cur_best is not None:
+            cur_best_f2 = float(cur_best[1])
+            if best_f2_so_far is None or cur_best_f2 + 1e-9 < float(best_f2_so_far):
+                best_f2_so_far = cur_best_f2
+                best_f2_no_improve = 0
+            else:
+                best_f2_no_improve += 1
+        else:
+            best_f2_no_improve += 1
+
+        cur_best_ind = _best_feasible_individual(pop_inds, archive)
+        basin_probe = None
+        if basin_shadow_enable:
+            basin_probe = _basin_probe_from_state(
+                cur_best_ind,
+                start=start,
+                goal=goal,
+                basin_registry=basin_registry,
+                basin_best_f2=basin_best_f2,
+                basin_histories=basin_histories,
+                basin_visit_counts=basin_visit_counts,
+                distinct_sequence=basin_distinct_sequence,
+                n_bands=basin_band_count,
+                n_samples=basin_signature_samples,
+                stagnation_window=basin_stagnation_window,
+                f2_tol_abs=basin_f2_tol_abs,
+                f2_tol_rel=basin_f2_tol_rel,
+                reference_f2=reference_f2,
+                ref_gap_tol=basin_ref_gap_tol,
+                min_distinct=basin_min_distinct,
+            )
+            if basin_probe is not None:
+                basin_probe = dict(basin_probe)
+                basin_probe['gen'] = int(gen)
+                basin_debug_tail.append(dict(basin_probe))
+
+        trigger_escape = bool(escape_injections > 0 and best_f2_no_improve >= escape_stall_window and (gen - last_escape_gen) >= max(3, escape_stall_window // 2))
+        if trigger_escape:
+            target_order = np.argsort(-(stall + 0.25 * (1.0 / np.maximum(utility, 1e-6))))
+            for target in target_order[: min(int(escape_injections), len(target_order))]:
+                target = int(target)
+                child = _make_escape_candidate(env, start, goal, K, rng, pop_inds, archive, sigma=escape_large_mut_sigma)
+                child[0] = start
+                child[-1] = goal
+                if not _cheap_candidate_precheck(env, child, parent=pop_inds[target].x, threat_mean=threat_mean, threat_std=threat_std):
+                    gen_precheck_reject += 1
+                    continue
+                t_e0 = time.perf_counter()
+                er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                gen_eval_s += (time.perf_counter() - t_e0)
+                n_eval += 1
+                gen_eval_count += 1
+                gen_escape_eval += 1
+                gen_escape_attempts += 1
+                prev_best_target = pop_inds[target].er
+                _update_neighbors_for_child(child, er_child, target)
+                if er_child.feasible and ((not prev_best_target.feasible) or float(er_child.obj[1]) + 1e-9 < float(prev_best_target.obj[1])):
+                    gen_escape_success += 1
+            last_escape_gen = gen
+            if gen_escape_success > 0:
+                best_f2_no_improve = 0
+
+        if cur_best is not None:
             for m in range(3):
                 best_hist[m].append(float(cur_best[m]))
+        archive.compact(force=True)
         # --- per-generation debug ---
         if logger is not None and ((gen % debug_every) == 0 or gen == int(n_gen) - 1):
             st = _pop_stats(pop_inds)
             gen_total_s = time.perf_counter() - gen_t0
-            n_eval_gen = max(1, int(active_n if "active_n" in locals() else pop))
+            n_eval_gen = max(1, int(gen_eval_count))
             avg_eval_ms = 1000.0 * gen_eval_s / max(1, n_eval_gen)
             avg_repair_ms = 1000.0 * gen_repair_s / max(1, n_eval_gen)
             avg_smooth_ms = 1000.0 * gen_smooth_s / max(1, n_eval_gen)
@@ -1721,7 +2202,7 @@ def moead(
 
             if debug_level <= 1:
                 logger.info(
-                    "[gen=%d] total=%.3fs archive=%d feasible=%d/%d (%.1f%%) min_viol=%.3f mean_viol=%.3f best_feas=%s extra=%s ls=%s",
+                    "[gen=%d] total=%.3fs archive=%d feasible=%d/%d (%.1f%%) min_viol=%.3f mean_viol=%.3f best_feas=%s extra=%s ls=%s escape=%d/%d",
                     int(gen),
                     float(gen_total_s),
                     int(len(archive.items)),
@@ -1733,12 +2214,14 @@ def moead(
                     str(best_obj),
                     gen_extreme_alloc.tolist(),
                     gen_ls_success.tolist(),
+                    int(gen_escape_success),
+                    int(gen_escape_attempts),
                 )
             else:
                 # Level>=2: add timing breakdown
                 msg = (
                     "[gen=%d] total=%.3fs archive=%d feasible=%d/%d (%.1f%%) "
-                    "eval=%.2fms repair=%.2fms smooth=%.2fms neigh=%.2fms best_feas=%s extra=%s ls=%s"
+                    "eval=%.2fms(n=%d) repair=%.2fms smooth=%.2fms neigh=%.2fms pre_reject=%d eval_split=%d/%d/%d/%d best_feas=%s extra=%s ls=%s escape=%d/%d"
                 )
 
                 if debug_level >= 3:
@@ -1768,12 +2251,20 @@ def moead(
                         int(st["n"]),
                         float(100.0 * st["feasible_ratio"]),
                         float(avg_eval_ms),
+                        int(gen_eval_count),
                         float(avg_repair_ms),
                         float(avg_smooth_ms),
                         float(avg_neighbor_ms),
+                        int(gen_precheck_reject),
+                        int(gen_regular_eval),
+                        int(gen_extra_eval),
+                        int(gen_ls_eval),
+                        int(gen_escape_eval),
                         str(best_obj),
                         gen_extreme_alloc.tolist(),
                         gen_ls_success.tolist(),
+                        int(gen_escape_success),
+                        int(gen_escape_attempts),
                         int(gen_coll_calls),
                         float(gen_coll_time),
                         int(est_cells),
@@ -1790,12 +2281,36 @@ def moead(
                         int(st["n"]),
                         float(100.0 * st["feasible_ratio"]),
                         float(avg_eval_ms),
+                        int(gen_eval_count),
                         float(avg_repair_ms),
                         float(avg_smooth_ms),
                         float(avg_neighbor_ms),
+                        int(gen_precheck_reject),
+                        int(gen_regular_eval),
+                        int(gen_extra_eval),
+                        int(gen_ls_eval),
+                        int(gen_escape_eval),
                         str(best_obj),
                         gen_extreme_alloc.tolist(),
                         gen_ls_success.tolist(),
+                        int(gen_escape_success),
+                        int(gen_escape_attempts),
+                    )
+                if basin_probe is not None:
+                    logger.info(
+                        "[gen=%d][basin] basin_id=%d entered=%s action=%s distinct=%d basin_best_f2=%.6f current_best_f2=%.6f span=%.6f plateau=%s ref_f2=%s ref_gap=%s sig=%s",
+                        int(gen),
+                        int(basin_probe["basin_id"]),
+                        str(bool(basin_probe["entered_new_basin"])),
+                        str(basin_probe["action"]),
+                        int(basin_probe["distinct_basins_seen"]),
+                        float(basin_probe["basin_best_f2"]),
+                        float(basin_probe["current_best_f2"]),
+                        float(basin_probe["basin_span"]),
+                        str(bool(basin_probe["basin_plateau"])),
+                        ("None" if basin_probe.get("reference_f2") is None else f"{float(basin_probe['reference_f2']):.6f}"),
+                        ("None" if basin_probe.get("reference_gap") is None else f"{float(basin_probe['reference_gap']):.6f}"),
+                        str(basin_probe["signature"]),
                     )
 
         cur_g_raw = _current_subproblem_scalar_values(pop_inds, W, z)
@@ -1854,11 +2369,101 @@ def moead(
                     float(mtoe_stats["window_max"]),
                 )
             if should_stop:
+                event = {
+                    "gen": int(gen),
+                    "reason": "mtoe",
+                    "enabled": bool(not disable_mtoe_stop),
+                    "mtoe": float(mtoe_stats["mtoe"]),
+                    "idx": int(mtoe_probe["idx"]),
+                    "delta_count": int(mtoe_probe["delta_count"]),
+                    "delta_mean": float(mtoe_probe["delta_mean"]),
+                    "window_std": float(mtoe_stats["window_std"]),
+                    "p_support": float(mtoe_stats["p_support"]),
+                    "mean_guard": bool(mtoe_stats["mean_guard"]),
+                    "tol_fun": float(mtoe_stats["tol_fun"]),
+                    "confidence": float(mtoe_stats["confidence"]),
+                    "basin": (dict(basin_probe) if basin_probe is not None else None),
+                }
+                shadow_stop_events.append(event)
+                basin_action = str(basin_probe.get("action")) if basin_probe is not None else "normal"
+                do_basin_escape = bool(basin_action == "escape" and basin_escape_injections > 0 and (gen - last_escape_gen) >= max(3, escape_stall_window // 2))
+                if do_basin_escape:
+                    target_order = np.argsort(-(stall + 0.25 * (1.0 / np.maximum(utility, 1e-6))))
+                    emergency_success = 0
+                    emergency_attempts = 0
+                    for target in target_order[: min(int(basin_escape_injections), len(target_order))]:
+                        target = int(target)
+                        child = _make_escape_candidate(env, start, goal, K, rng, pop_inds, archive, sigma=escape_large_mut_sigma)
+                        if not _cheap_candidate_precheck(env, child, parent=pop_inds[target].x, threat_mean=threat_mean, threat_std=threat_std):
+                            gen_precheck_reject += 1
+                            continue
+                        er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                        n_eval += 1
+                        gen_eval_count += 1
+                        gen_escape_eval += 1
+                        emergency_attempts += 1
+                        prev_best_target = pop_inds[target].er
+                        _update_neighbors_for_child(child, er_child, target)
+                        if er_child.feasible and ((not prev_best_target.feasible) or float(er_child.obj[1]) + 1e-9 < float(prev_best_target.obj[1])):
+                            emergency_success += 1
+                    last_escape_gen = gen
+                    if emergency_success > 0:
+                        best_f2_no_improve = 0
+                    if logger is not None:
+                        logger.info("[basin_escape] gen=%d action=%s success=%d/%d basin_id=%s", int(gen), basin_action, int(emergency_success), int(emergency_attempts), str(None if basin_probe is None else basin_probe.get('basin_id')))
+                    if emergency_success > 0:
+                        continue
+                emergency_escape = bool(escape_injections > 0 and (gen - last_escape_gen) >= max(3, escape_stall_window // 2))
+                if emergency_escape:
+                    target_order = np.argsort(-(stall + 0.25 * (1.0 / np.maximum(utility, 1e-6))))
+                    emergency_success = 0
+                    emergency_attempts = 0
+                    for target in target_order[: min(int(escape_injections), len(target_order))]:
+                        target = int(target)
+                        child = _make_escape_candidate(env, start, goal, K, rng, pop_inds, archive, sigma=escape_large_mut_sigma)
+                        if not _cheap_candidate_precheck(env, child, parent=pop_inds[target].x, threat_mean=threat_mean, threat_std=threat_std):
+                            gen_precheck_reject += 1
+                            continue
+                        er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                        n_eval += 1
+                        gen_eval_count += 1
+                        gen_escape_eval += 1
+                        emergency_attempts += 1
+                        prev_best_target = pop_inds[target].er
+                        _update_neighbors_for_child(child, er_child, target)
+                        if er_child.feasible and ((not prev_best_target.feasible) or float(er_child.obj[1]) + 1e-9 < float(prev_best_target.obj[1])):
+                            emergency_success += 1
+                    last_escape_gen = gen
+                    best_f2_no_improve = 0
+                    if logger is not None:
+                        logger.info("[escape] reason=pre_stop gen=%d success=%d/%d", int(gen), int(emergency_success), int(emergency_attempts))
+                    if emergency_success > 0:
+                        continue
+                if disable_mtoe_stop:
+                    if logger is not None:
+                        logger.info(
+                            "[shadow_stop] reason=mtoe gen=%d value=%.6e idx=%d nonzero=%d mean=%.6e std=%.6e p_support=%.6f mean_guard=%s tol_fun=%.6e confidence=%.6f enabled=%s basin_action=%s basin_id=%s",
+                            int(gen),
+                            float(mtoe_stats["mtoe"]),
+                            int(mtoe_probe["idx"]),
+                            int(mtoe_probe["delta_count"]),
+                            float(mtoe_probe["delta_mean"]),
+                            float(mtoe_stats["window_std"]),
+                            float(mtoe_stats["p_support"]),
+                            str(bool(mtoe_stats["mean_guard"])),
+                            float(mtoe_stats["tol_fun"]),
+                            float(mtoe_stats["confidence"]),
+                            str(False),
+                            str(basin_action),
+                            str(None if basin_probe is None else basin_probe.get('basin_id')),
+                        )
+                    continue
                 stop_reason = "mtoe"
-                stop_info = mtoe_stats
+                stop_info = dict(mtoe_stats)
+                stop_info["basin_probe"] = (dict(basin_probe) if basin_probe is not None else None)
                 if logger is not None:
                     logger.info(
-                        "[stop] reason=mtoe gen=%d value=%.6e idx=%d nonzero=%d mean=%.6e std=%.6e p_support=%.6f mean_guard=%s tol_fun=%.6e confidence=%.6f",
+                        "[stop] reason=mtoe gen=%d value=%.6e idx=%d nonzero=%d mean=%.6e std=%.6e p_support=%.6f mean_guard=%s tol_fun=%.6e confidence=%.6f basin_action=%s basin_id=%s",
                         int(gen),
                         float(mtoe_stats["mtoe"]),
                         int(mtoe_probe["idx"]),
@@ -1869,6 +2474,8 @@ def moead(
                         str(bool(mtoe_stats["mean_guard"])),
                         float(mtoe_stats["tol_fun"]),
                         float(mtoe_stats["confidence"]),
+                        str(basin_action),
+                        str(None if basin_probe is None else basin_probe.get('basin_id')),
                     )
                 break
 
@@ -1906,6 +2513,24 @@ def moead(
         "mtoe_debug_tail": [dict(v) for v in list(mtoe_debug_tail)],
         "mtoe_tests_run": int(mtoe_tests_run),
         "mtoe_stop": stop_info,
+        "disable_mtoe_stop": bool(disable_mtoe_stop),
+        "shadow_stop_events": [dict(v) for v in shadow_stop_events],
+        "first_shadow_stop_gen": (int(shadow_stop_events[0]["gen"]) if shadow_stop_events else None),
+        "shadow_stop_count": int(len(shadow_stop_events)),
+        "basin_shadow_enable": bool(basin_shadow_enable),
+        "basin_band_count": int(basin_band_count),
+        "basin_signature_samples": int(basin_signature_samples),
+        "basin_stagnation_window": int(basin_stagnation_window),
+        "basin_f2_tol_abs": float(basin_f2_tol_abs),
+        "basin_f2_tol_rel": float(basin_f2_tol_rel),
+        "basin_ref_gap_tol": float(basin_ref_gap_tol),
+        "basin_min_distinct": int(basin_min_distinct),
+        "basin_escape_injections": int(basin_escape_injections),
+        "reference_f2": reference_f2,
+        "distinct_basin_count": int(len(basin_registry)),
+        "basin_debug_tail": [dict(v) for v in list(basin_debug_tail)],
         "ideal_point": z.tolist(),
+        "init_profile": dict(init_profile),
+        "init_s": float(init_s),
     }
     return pop_inds, archive, log

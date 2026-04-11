@@ -99,38 +99,18 @@ def parse_moead_debug_log_to_rows(log_path: str, *, terrain_base=None, terrain_s
     pat_start = re.compile(
         r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[start\].*?env\(H=(?P<H>\d+),W=(?P<W>\d+)\).*?seed=(?P<seed>\d+).*?n_gen=(?P<n_gen>\d+).*?pop=(?P<pop>\d+).*?K=(?P<K>\d+).*?T=(?P<T>\d+).*$"
     )
-    pat_gen = re.compile(
-        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[gen=(?P<gen>\d+)\]"
-        r".*?total=(?P<total>[0-9.]+)s"
-        r".*?archive=(?P<archive>\d+)"
-        r".*?feasible=(?P<feas>\d+)\/(?P<pop>\d+)"
-        r".*?(?:eval=(?P<eval>[0-9.]+)ms)?"
-        r".*?(?:repair=(?P<repair>[0-9.]+)ms)?"
-        r".*?(?:smooth=(?P<smooth>[0-9.]+)ms)?"
-        r".*?(?:neigh=(?P<neigh>[0-9.]+)ms)?"
-        r".*?(?:best_feas=\[(?P<best>[^\]]+)\])?"
-        r".*?(?:extra=\[(?P<extra>[^\]]+)\])?"
-        r".*?(?:ls=\[(?P<ls>[^\]]+)\])?"
-        r".*$"
-    )
     pat_mtoe = re.compile(
         r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[gen=(?P<gen>\d+)\]\[mtoe\].*?"
-        r"value=(?P<value>[-+eE0-9.]+)"
-        r"(?:.*?idx=(?P<idx>\d+))?"
-        r"(?:.*?nonzero=(?P<nonzero>\d+))?"
-        r"(?:.*?mean=(?P<mean>[-+eE0-9.]+))?"
-        r"(?:.*?p90=(?P<p90>[-+eE0-9.]+))?"
-        r"(?:.*?std=(?P<std>[-+eE0-9.]+))?"
-        r"(?:.*?var=(?P<var>[-+eE0-9.]+))?"
-        r"(?:.*?p_support=(?P<p_support>[-+eE0-9.]+))?"
-        r"(?:.*?mean_guard=(?P<mean_guard>[-+eE0-9.]+))?"
-        r"(?:.*?tol_fun=(?P<tol_fun>[-+eE0-9.]+))?"
-        r"(?:.*?confidence=(?P<confidence>[-+eE0-9.]+))?"
-        r"(?:.*?z_shift_inf=(?P<z_shift_inf>[-+eE0-9.]+))?"
-        r"(?:.*?window=\[(?P<window_min>[-+eE0-9.]+),(?P<window_max>[-+eE0-9.]+)\])?"
-        r".*$"
+        r"value=(?P<value>[-+eE0-9.]+).*?idx=(?P<idx>\d+).*?nonzero=(?P<nonzero>\d+).*?"
+        r"mean=(?P<mean>[-+eE0-9.]+).*?p90=(?P<p90>[-+eE0-9.]+).*?std=(?P<std>[-+eE0-9.]+).*?"
+        r"var=(?P<var>[-+eE0-9.]+).*?p_support=(?P<p_support>[-+eE0-9.]+).*?mean_guard=(?P<mean_guard>\S+).*?"
+        r"tol_fun=(?P<tol_fun>[-+eE0-9.]+).*?confidence=(?P<confidence>[-+eE0-9.]+).*?z_shift_inf=(?P<z_shift_inf>[-+eE0-9.]+).*?"
+        r"window=\[(?P<window_min>[-+eE0-9.]+), (?P<window_max>[-+eE0-9.]+)\]$"
     )
     pat_stop = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[stop\].*?(?:reason=)?(?P<reason>[^,]+).*$")
+    pat_gen_head = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[gen=(?P<gen>\d+)\].*?total=(?P<total>[0-9.]+)s.*?archive=(?P<archive>\d+).*?feasible=(?P<feas>\d+)\/(?P<pop>\d+)"
+    )
     with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
             s = line.strip()
@@ -142,29 +122,51 @@ def parse_moead_debug_log_to_rows(log_path: str, *, terrain_base=None, terrain_s
                 continue
             m = pat_mtoe.match(s)
             if m:
-                rows_mtoe.append(dict(common, row_type='mtoe', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), value=_safe_float(m.group('value')), idx=_safe_int(m.group('idx')), nonzero=_safe_int(m.group('nonzero')), mean=_safe_float(m.group('mean')), p90=_safe_float(m.group('p90')), std=_safe_float(m.group('std')), var=_safe_float(m.group('var')), p_support=_safe_float(m.group('p_support')), mean_guard=_safe_float(m.group('mean_guard')), tol_fun=_safe_float(m.group('tol_fun')), confidence=_safe_float(m.group('confidence')), z_shift_inf=_safe_float(m.group('z_shift_inf')), window_min=_safe_float(m.group('window_min')), window_max=_safe_float(m.group('window_max'))))
+                rows_mtoe.append(dict(common, row_type='mtoe', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), value=_safe_float(m.group('value')), idx=_safe_int(m.group('idx')), nonzero=_safe_int(m.group('nonzero')), mean=_safe_float(m.group('mean')), p90=_safe_float(m.group('p90')), std=_safe_float(m.group('std')), var=_safe_float(m.group('var')), p_support=_safe_float(m.group('p_support')), mean_guard=m.group('mean_guard'), tol_fun=_safe_float(m.group('tol_fun')), confidence=_safe_float(m.group('confidence')), z_shift_inf=_safe_float(m.group('z_shift_inf')), window_min=_safe_float(m.group('window_min')), window_max=_safe_float(m.group('window_max'))))
                 continue
-            m = pat_gen.match(s)
+            m = pat_gen_head.match(s)
             if m:
-                best = [x.strip() for x in (m.group('best') or '').split(',') if x.strip()]
-                extra = [x.strip() for x in (m.group('extra') or '').split(',') if x.strip()]
-                ls = [x.strip() for x in (m.group('ls') or '').split(',') if x.strip()]
-                row = dict(common, row_type='gen', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), total_s=_safe_float(m.group('total')), archive=_safe_int(m.group('archive')), feasible=_safe_int(m.group('feas')), pop=_safe_int(m.group('pop')), eval_ms=_safe_float(m.group('eval')), repair_ms=_safe_float(m.group('repair')), smooth_ms=_safe_float(m.group('smooth')), neigh_ms=_safe_float(m.group('neigh')))
+                row = dict(common, row_type='gen', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), total_s=_safe_float(m.group('total')), archive=_safe_int(m.group('archive')), feasible=_safe_int(m.group('feas')), pop=_safe_int(m.group('pop')))
+                kv_patterns = {
+                    'eval_ms': r'eval=([0-9.]+)ms',
+                    'eval_n': r'eval=[0-9.]+ms\(n=(\d+)\)',
+                    'repair_ms': r'repair=([0-9.]+)ms',
+                    'smooth_ms': r'smooth=([0-9.]+)ms',
+                    'neigh_ms': r'neigh=([0-9.]+)ms',
+                    'pre_reject': r'pre_reject=(\d+)',
+                }
+                for key, pat in kv_patterns.items():
+                    mm = re.search(pat, s)
+                    row[key] = _safe_float(mm.group(1)) if (mm and key.endswith('_ms')) else (_safe_int(mm.group(1)) if mm else None)
+                mm = re.search(r'eval_split=(\d+)\/(\d+)\/(\d+)\/(\d+)', s)
+                if mm:
+                    row['eval_split_regular'] = _safe_int(mm.group(1))
+                    row['eval_split_extra'] = _safe_int(mm.group(2))
+                    row['eval_split_ls'] = _safe_int(mm.group(3))
+                    row['eval_split_escape'] = _safe_int(mm.group(4))
                 if row['feasible'] is not None and row['pop']:
                     row['feasible_pct'] = 100.0 * row['feasible'] / row['pop']
-                for i in range(min(3, len(best))):
-                    row[f'best_feas_f{i+1}'] = _safe_float(best[i])
-                for i in range(min(3, len(extra))):
-                    row[f'extra_{i+1}'] = _safe_int(extra[i])
-                for i in range(min(3, len(ls))):
-                    row[f'ls_{i+1}'] = _safe_int(ls[i])
+                mm = re.search(r'best_feas=\[([^\]]+)\]', s)
+                if mm:
+                    best = [x.strip() for x in mm.group(1).split(',') if x.strip()]
+                    for i in range(min(3, len(best))):
+                        row[f'best_feas_f{i+1}'] = _safe_float(best[i])
+                mm = re.search(r'extra=\[([^\]]+)\]', s)
+                if mm:
+                    extra = [x.strip() for x in mm.group(1).split(',') if x.strip()]
+                    for i in range(min(3, len(extra))):
+                        row[f'extra_{i+1}'] = _safe_int(extra[i])
+                mm = re.search(r'ls=\[([^\]]+)\]', s)
+                if mm:
+                    ls = [x.strip() for x in mm.group(1).split(',') if x.strip()]
+                    for i in range(min(3, len(ls))):
+                        row[f'ls_{i+1}'] = _safe_int(ls[i])
                 rows_gen.append(row)
                 continue
             m = pat_stop.match(s)
             if m:
                 rows_mtoe.append(dict(common, row_type='stop', timestamp=m.group('ts'), reason=(m.group('reason') or '').strip()))
     return rows_gen, rows_mtoe
-
 
 def mtoe_summary_row_from_metrics(moead_metric_block: dict | None, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
     mo = moead_metric_block or {}
@@ -178,24 +180,43 @@ def mtoe_summary_row_from_metrics(moead_metric_block: dict | None, *, terrain_ba
 def parse_mtoe_debug_dump_to_rows(log_path: str, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
     if not log_path or not os.path.exists(log_path):
         return []
+    import re
     rows = []
-    section = None
+    common = {}
+    pat_summary = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[summary\]\[mtoe_debug\].*?last=(?P<last>\S+).*?hist_len=(?P<hist_len>\d+).*?tests_run=(?P<tests_run>\S+).*$"
+    )
+    pat_gen = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[gen=(?P<gen>\d+)\]\[mtoe_debug\].*?"
+        r"value=(?P<value>\S+).*?idx=(?P<idx>\S+).*?nonzero=(?P<nonzero>\S+).*?"
+        r"mean=(?P<mean>\S+).*?p90=(?P<p90>\S+).*?prev_best=(?P<prev_best>\S+).*?"
+        r"cur_raw=(?P<cur_raw>\S+).*?cur_best=(?P<cur_best>\S+).*?z_shift_inf=(?P<z_shift_inf>\S+).*?z_shift_l2=(?P<z_shift_l2>\S+).*$"
+    )
+    pat_stop = re.compile(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?\[stop\]\[mtoe_debug\].*?reason=(?P<reason>\S+).*?gamma=(?P<gamma>\S+).*?"
+        r"value=(?P<value>\S+).*?idx=(?P<idx>\S+).*?nonzero=(?P<nonzero>\S+).*?mean=(?P<mean>\S+).*?p90=(?P<p90>\S+).*?"
+        r"std=(?P<std>\S+).*?var=(?P<var>\S+).*?p_support=(?P<p_support>\S+).*?mean_guard=(?P<mean_guard>\S+).*?"
+        r"tol_fun=(?P<tol_fun>\S+).*?confidence=(?P<confidence>\S+).*?window=\[(?P<window_min>\S+),(?P<window_max>\S+)\].*$"
+    )
     with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
         for raw in f:
-            line = raw.rstrip('\n')
-            s = line.strip()
+            s = raw.strip()
             if not s:
                 continue
-            if s.startswith('[') and s.endswith(']') and len(s) > 2:
-                section = s[1:-1]
+            m = pat_summary.match(s)
+            if m:
+                rows.append(dict(common, row_type='summary', timestamp=m.group('ts'), last=_safe_float(m.group('last')), hist_len=_safe_int(m.group('hist_len')), tests_run=_safe_int(m.group('tests_run'))))
                 continue
-            if ':' in s and section is None:
-                k, v = s.split(':', 1)
-                rows.append(dict(row_type='kv', section='__meta__', key=k.strip(), value=v.strip()))
-            else:
-                rows.append(dict(row_type='section', section=section or '__body__', value=s))
+            m = pat_gen.match(s)
+            if m:
+                rows.append(dict(common, row_type='gen', timestamp=m.group('ts'), gen=_safe_int(m.group('gen')), value=_safe_float(m.group('value')), idx=_safe_int(m.group('idx')), nonzero=_safe_int(m.group('nonzero')), mean=_safe_float(m.group('mean')), p90=_safe_float(m.group('p90')), prev_best=_safe_float(m.group('prev_best')), cur_raw=_safe_float(m.group('cur_raw')), cur_best=_safe_float(m.group('cur_best')), z_shift_inf=_safe_float(m.group('z_shift_inf')), z_shift_l2=_safe_float(m.group('z_shift_l2'))))
+                continue
+            m = pat_stop.match(s)
+            if m:
+                rows.append(dict(common, row_type='stop', timestamp=m.group('ts'), reason=(m.group('reason') or '').strip(), gamma=_safe_int(m.group('gamma')), value=_safe_float(m.group('value')), idx=_safe_int(m.group('idx')), nonzero=_safe_int(m.group('nonzero')), mean=_safe_float(m.group('mean')), p90=_safe_float(m.group('p90')), std=_safe_float(m.group('std')), var=_safe_float(m.group('var')), p_support=_safe_float(m.group('p_support')), mean_guard=m.group('mean_guard'), tol_fun=_safe_float(m.group('tol_fun')), confidence=_safe_float(m.group('confidence')), window_min=_safe_float(m.group('window_min')), window_max=_safe_float(m.group('window_max'))))
+                continue
+            rows.append(dict(common, row_type='raw', value=s))
     return rows
-
 
 def debug_payload_to_rows(debug_payload, *, terrain_base=None, terrain_seed=None, planner_seed=None, size_tag=None):
     if not isinstance(debug_payload, dict) or not debug_payload:
@@ -362,7 +383,7 @@ def _compact_mtoe_stop_info(stop_info):
         "gamma", "variance", "window_std", "stat", "critical_stat",
         "p_support", "tol_fun", "confidence", "mean_guard",
         "legacy_stop_without_mean_guard", "mtoe", "window_min",
-        "window_max", "window_mean", "probe",
+        "window_max", "window_mean", "probe", "basin_probe",
     ]
     return {k: stop_info.get(k) for k in keep if k in stop_info}
 
@@ -390,6 +411,20 @@ def split_moead_log(log):
         "mtoe_confidence",
         "stop_reason",
         "mtoe_window",
+        "disable_mtoe_stop",
+        "first_shadow_stop_gen",
+        "shadow_stop_count",
+        "basin_shadow_enable",
+        "basin_band_count",
+        "basin_signature_samples",
+        "basin_stagnation_window",
+        "basin_f2_tol_abs",
+        "basin_f2_tol_rel",
+        "basin_ref_gap_tol",
+        "basin_min_distinct",
+        "basin_escape_injections",
+        "reference_f2",
+        "distinct_basin_count",
         "ideal_point",
     }
     metric_log = {k: log[k] for k in metric_keys if k in log}
@@ -400,28 +435,90 @@ def split_moead_log(log):
 
 
 def write_mtoe_debug_log(log_path: str, *, terrain_file: str = None, terrain_seed: int = None, planner_seed: int = None, debug_payload=None):
-    """Write debug-only MTOE/MOEA-D payload to a dedicated .log file."""
+    """Write debug-only MTOE/MOEA-D payload in the same line-oriented style as moead_debug.log."""
     if not log_path or not debug_payload:
         return
+
+    def _fmt_float(x):
+        return "None" if x is None else f"{float(x):.6e}"
+
     lines = []
-    if terrain_file is not None:
-        lines.append(f"terrain_file: {terrain_file}")
-    if terrain_seed is not None:
-        lines.append(f"terrain_seed: {terrain_seed}")
-    if planner_seed is not None:
-        lines.append(f"planner_seed: {planner_seed}")
-    lines.append("")
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines.append(
+        f"{ts} INFO [start][mtoe_debug] terrain_file={terrain_file} terrain_seed={terrain_seed} planner_seed={planner_seed}"
+    )
+
     if isinstance(debug_payload, dict):
-        for k, v in debug_payload.items():
-            lines.append(f"[{k}]")
-            if isinstance(v, (list, dict)):
-                lines.append(json.dumps(v, ensure_ascii=False, indent=2))
-            else:
-                lines.append(str(v))
-            lines.append("")
+        hist = debug_payload.get('mtoe_history_tail') or []
+        tests_run = debug_payload.get('mtoe_tests_run')
+        last_val = debug_payload.get('mtoe_last')
+        lines.append(
+            f"{ts} INFO [summary][mtoe_debug] last={_fmt_float(last_val)} hist_len={len(hist)} tests_run={tests_run}"
+        )
+
+        for item in debug_payload.get('mtoe_debug_tail') or []:
+            if not isinstance(item, dict):
+                continue
+            gen = item.get('gen')
+            lines.append(
+                f"{ts} INFO [gen={gen}][mtoe_debug] "
+                f"value={_fmt_float(item.get('value'))} idx={item.get('idx')} nonzero={item.get('delta_count')} "
+                f"mean={_fmt_float(item.get('delta_mean'))} p90={_fmt_float(item.get('delta_p90'))} "
+                f"prev_best={_fmt_float(item.get('prev_best'))} cur_raw={_fmt_float(item.get('cur_raw'))} cur_best={_fmt_float(item.get('cur_best'))} "
+                f"z_shift_inf={_fmt_float(item.get('z_delta_inf'))} z_shift_l2={_fmt_float(item.get('z_delta_l2'))}"
+            )
+
+        stop = debug_payload.get('mtoe_stop')
+        if isinstance(stop, dict):
+            probe = stop.get('probe') if isinstance(stop.get('probe'), dict) else {}
+            basin_probe = stop.get('basin_probe') if isinstance(stop.get('basin_probe'), dict) else {}
+            lines.append(
+                f"{ts} INFO [stop][mtoe_debug] reason=mtoe gamma={stop.get('gamma')} "
+                f"value={_fmt_float(stop.get('mtoe'))} idx={probe.get('idx')} nonzero={probe.get('delta_count')} "
+                f"mean={_fmt_float(probe.get('delta_mean'))} p90={_fmt_float(probe.get('delta_p90'))} "
+                f"std={_fmt_float(stop.get('window_std'))} var={_fmt_float(stop.get('variance'))} "
+                f"p_support={_fmt_float(stop.get('p_support'))} mean_guard={stop.get('mean_guard')} "
+                f"tol_fun={_fmt_float(stop.get('tol_fun'))} confidence={_fmt_float(stop.get('confidence'))} "
+                f"window=[{_fmt_float(stop.get('window_min'))},{_fmt_float(stop.get('window_max'))}] "
+                f"basin_action={basin_probe.get('action')} basin_id={basin_probe.get('basin_id')}"
+            )
+
+        shadow_events = debug_payload.get('shadow_stop_events') or []
+        if shadow_events:
+            first_gen = shadow_events[0].get('gen')
+            gens = ','.join(str(int(ev.get('gen'))) for ev in shadow_events if ev.get('gen') is not None)
+            lines.append(f"{ts} INFO [shadow_summary][mtoe_debug] count={len(shadow_events)} first_gen={first_gen} gens={gens}")
+            for ev in shadow_events[-25:]:
+                basin = ev.get('basin') if isinstance(ev.get('basin'), dict) else {}
+                lines.append(
+                    f"{ts} INFO [shadow_stop][mtoe_debug] reason={ev.get('reason')} gen={ev.get('gen')} "
+                    f"value={_fmt_float(ev.get('mtoe'))} idx={ev.get('idx')} nonzero={ev.get('delta_count')} "
+                    f"mean={_fmt_float(ev.get('delta_mean'))} std={_fmt_float(ev.get('window_std'))} p_support={_fmt_float(ev.get('p_support'))} "
+                    f"mean_guard={ev.get('mean_guard')} tol_fun={_fmt_float(ev.get('tol_fun'))} confidence={_fmt_float(ev.get('confidence'))} "
+                    f"enabled={ev.get('enabled')} basin_action={basin.get('action')} basin_id={basin.get('basin_id')} ref_gap={_fmt_float(basin.get('reference_gap'))}"
+                )
+
+        for item in debug_payload.get('basin_debug_tail') or []:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"{ts} INFO [gen={item.get('gen')}][basin_debug] basin_id={item.get('basin_id')} entered={item.get('entered_new_basin')} "
+                f"action={item.get('action')} distinct={item.get('distinct_basins_seen')} basin_best_f2={_fmt_float(item.get('basin_best_f2'))} "
+                f"current_best_f2={_fmt_float(item.get('current_best_f2'))} span={_fmt_float(item.get('basin_span'))} plateau={item.get('basin_plateau')} "
+                f"ref_f2={_fmt_float(item.get('reference_f2'))} ref_gap={_fmt_float(item.get('reference_gap'))} sig={item.get('signature')}"
+            )
+
+        init_profile = debug_payload.get('init_profile')
+        if isinstance(init_profile, dict) and init_profile:
+            compact = ' '.join(f"{k}={v}" for k, v in sorted(init_profile.items()))
+            lines.append(f"{ts} INFO [init][mtoe_debug] {compact}")
+
+        if 'init_s' in debug_payload:
+            lines.append(f"{ts} INFO [init_ratio][mtoe_debug] init_s={_fmt_float(debug_payload.get('init_s'))}")
     else:
-        lines.append(str(debug_payload))
-        lines.append("")
+        lines.append(f"{ts} INFO [payload][mtoe_debug] value={str(debug_payload)}")
+
+    lines.append(f"{ts} INFO [end][mtoe_debug]")
     Path(log_path).write_text("\n".join(lines).rstrip() + "\n", encoding='utf-8')
 
 def build_moead_metrics_block(args, log, runtime_ms: float, archive_size: int):
@@ -444,6 +541,22 @@ def build_moead_metrics_block(args, log, runtime_ms: float, archive_size: int):
             "window": int(metric_log.get("mtoe_window", 10)),
             "tol_fun": float(args.mtoe_tol_fun),
             "confidence": float(args.mtoe_confidence),
+            "disable_stop": bool(metric_log.get("disable_mtoe_stop", False)),
+            "first_shadow_stop_gen": metric_log.get("first_shadow_stop_gen"),
+            "shadow_stop_count": metric_log.get("shadow_stop_count"),
+        },
+        "basin_shadow": {
+            "enabled": bool(metric_log.get("basin_shadow_enable", False)),
+            "band_count": metric_log.get("basin_band_count"),
+            "signature_samples": metric_log.get("basin_signature_samples"),
+            "stagnation_window": metric_log.get("basin_stagnation_window"),
+            "f2_tol_abs": metric_log.get("basin_f2_tol_abs"),
+            "f2_tol_rel": metric_log.get("basin_f2_tol_rel"),
+            "ref_gap_tol": metric_log.get("basin_ref_gap_tol"),
+            "min_distinct": metric_log.get("basin_min_distinct"),
+            "escape_injections": metric_log.get("basin_escape_injections"),
+            "reference_f2": metric_log.get("reference_f2"),
+            "distinct_basin_count": metric_log.get("distinct_basin_count"),
         },
         "pop": int(args.moead_pop),
         "K": int(args.K),
@@ -764,6 +877,16 @@ def main():
     ap.add_argument("--moead_max_gen", type=int, default=None)
     ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
     ap.add_argument("--mtoe_confidence", type=float, default=0.99)
+    ap.add_argument("--disable_mtoe_stop", action="store_true", help="run to moead_max_gen but keep recording shadow MTOE stop events")
+    ap.add_argument("--basin_shadow_enable", type=int, default=1, help="enable basin-aware shadow monitoring (1/0)")
+    ap.add_argument("--basin_band_count", type=int, default=7, help="number of lateral bins for basin signature")
+    ap.add_argument("--basin_signature_samples", type=int, default=9, help="number of progress samples used in basin signature")
+    ap.add_argument("--basin_stagnation_window", type=int, default=10, help="window for basin saturation checks")
+    ap.add_argument("--basin_f2_tol_abs", type=float, default=1.0, help="absolute f2 span tolerance for basin plateau")
+    ap.add_argument("--basin_f2_tol_rel", type=float, default=0.01, help="relative f2 span tolerance for basin plateau")
+    ap.add_argument("--basin_ref_gap_tol", type=float, default=0.08, help="reference-gap threshold for stop_candidate vs escape")
+    ap.add_argument("--basin_min_distinct", type=int, default=2, help="minimum distinct basins before stop_candidate is allowed")
+    ap.add_argument("--basin_escape_injections", type=int, default=0, help="extra escape injections when basin monitor says action=escape")
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
 
@@ -1116,6 +1239,17 @@ def main():
                 moead_max_gen=args.moead_max_gen,
                 mtoe_tol_fun=args.mtoe_tol_fun,
                 mtoe_confidence=args.mtoe_confidence,
+                disable_mtoe_stop=bool(args.disable_mtoe_stop),
+                basin_shadow_enable=bool(args.basin_shadow_enable),
+                basin_band_count=args.basin_band_count,
+                basin_signature_samples=args.basin_signature_samples,
+                basin_stagnation_window=args.basin_stagnation_window,
+                basin_f2_tol_abs=args.basin_f2_tol_abs,
+                basin_f2_tol_rel=args.basin_f2_tol_rel,
+                basin_ref_gap_tol=args.basin_ref_gap_tol,
+                basin_min_distinct=args.basin_min_distinct,
+                basin_escape_injections=args.basin_escape_injections,
+                reference_f2=(float(rrt_obj[1]) if np.isfinite(rrt_obj[1]) else None),
                 pop=args.moead_pop,
                 K=args.K,
                 T=args.moead_T,
@@ -1189,6 +1323,10 @@ def main():
                         "moead_max_gen": args.moead_max_gen,
                         "mtoe_tol_fun": args.mtoe_tol_fun,
                         "mtoe_confidence": args.mtoe_confidence,
+                        "disable_mtoe_stop": bool(args.disable_mtoe_stop),
+                        "basin_shadow_enable": bool(args.basin_shadow_enable),
+                        "basin_stagnation_window": args.basin_stagnation_window,
+                        "basin_escape_injections": args.basin_escape_injections,
                         "moead_pop": args.moead_pop,
                         "moead_T": args.moead_T,
                         "K": args.K,
@@ -1336,7 +1474,7 @@ def main():
                 _append_rows_csv(
                     mtoe_debug_csv_path,
                     mtoe_debug_rows,
-                    preset_fieldnames=['row_type','section','key','value']
+                    preset_fieldnames=['row_type','timestamp','gen','last','hist_len','tests_run','value','idx','nonzero','mean','p90','prev_best','cur_raw','cur_best','z_shift_inf','z_shift_l2','reason','gamma','std','var','p_support','mean_guard','tol_fun','confidence','window_min','window_max']
                 )
 
     

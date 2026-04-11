@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
 from ..env.grid_env import GridEnv
-from ..env.collision import sampled_points_array
+from ..env.collision import sampled_polyline_points_array
 
 
 @dataclass
@@ -72,8 +72,7 @@ def evaluate_path(
 
     # Fast vectorized sampling over all segments at once.
     if len(path) >= 2:
-        seg_pts = [sampled_points_array(path[i - 1], path[i], step=sample_step, xy_resolution=env.resolution) for i in range(1, len(path))]
-        pts = np.concatenate(seg_pts, axis=0) if len(seg_pts) > 1 else seg_pts[0]
+        pts = sampled_polyline_points_array(path, step=sample_step, xy_resolution=env.resolution)
     else:
         pts = path[:1]
 

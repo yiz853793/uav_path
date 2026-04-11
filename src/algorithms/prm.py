@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..env.collision import sampled_cells_array, segment_collision
+from ..env.collision import sampled_points_array, segment_collision
 from ..env.grid_env import GridEnv
 from ..models.path import shortcut_smooth
 
@@ -294,21 +294,34 @@ def _collect_component_info(graph: PRMGraph, start_idx: int = 0, goal_idx: int =
     }
 
 
-def _edge_cost_3d(
+def _edge_feasible_and_cost_3d(
     env: GridEnv,
     p0: np.ndarray,
     p1: np.ndarray,
     threat_weight: float,
     collision_step: float,
-) -> float:
-    base = _dist(env, p0, p1)
-    if threat_weight == 0.0:
-        return float(base)
-    ix, iy = sampled_cells_array(p0[:2], p1[:2], step=collision_step, xy_resolution=env.resolution)
-    ix = np.clip(ix, 0, env.W - 1)
-    iy = np.clip(iy, 0, env.H - 1)
+    clearance_margin: float,
+) -> tuple[bool, float]:
+    pts = sampled_points_array(np.asarray(p0, dtype=np.float32), np.asarray(p1, dtype=np.float32), step=collision_step, xy_resolution=env.resolution)
+    ix = np.rint(pts[:, 0]).astype(np.int32, copy=False)
+    iy = np.rint(pts[:, 1]).astype(np.int32, copy=False)
+    oob = (ix < 0) | (ix >= env.W) | (iy < 0) | (iy >= env.H)
+    if bool(np.any(oob)):
+        return False, 0.0
+    z = pts[:, 2]
+    ground = env.height[iy, ix]
+    clearance = env.min_clearance + float(clearance_margin)
+    if bool(np.any(z < ground + clearance)) or bool(np.any(z < env.z_min)) or bool(np.any(z > env.z_max)):
+        return False, 0.0
+
+    dxyz = (np.asarray(p1, dtype=np.float32) - np.asarray(p0, dtype=np.float32)).astype(np.float32, copy=False)
+    dxyz[0] *= float(env.resolution)
+    dxyz[1] *= float(env.resolution)
+    base = float(np.linalg.norm(dxyz))
+    if float(threat_weight) == 0.0:
+        return True, base
     threat_cost = float(env.threat[iy, ix].mean(dtype=np.float64))
-    return float(base + float(threat_weight) * threat_cost)
+    return True, float(base + float(threat_weight) * threat_cost)
 
 
 def _build_roadmap_3d(
@@ -329,13 +342,17 @@ def _build_roadmap_3d(
     max_edge_len = float(max_edge_len)
     cell_size_cells = max(1.0, max_edge_len / max(float(env.resolution), 1e-6))
     buckets = _build_spatial_hash(points_xyz, cell_size_cells=cell_size_cells)
+    metric_pts = points_xyz.astype(np.float32, copy=True)
+    metric_pts[:, 0] *= float(env.resolution)
+    metric_pts[:, 1] *= float(env.resolution)
     max_search_rings = 10
     attempted_edges = 0
     collision_rejects = 0
+    max_edge_len2 = max_edge_len * max_edge_len
 
     for i in range(n):
         cand: list[int] = []
-        target_unique = max(k_eff * 10, 40)
+        target_unique = max(k_eff * 4, 24)
         for rings in range(1, max_search_rings + 1):
             cand = _candidate_neighbors_from_hash(points_xyz, i, buckets, cell_size_cells, rings)
             uniq = len(set(c for c in cand if c != i))
@@ -345,27 +362,32 @@ def _build_roadmap_3d(
         if not cand:
             continue
 
-        pj = points_xyz[np.asarray(cand, dtype=np.int32)]
-        dxyz = pj - points_xyz[i][None, :]
-        dxyz[:, 0] *= env.resolution
-        dxyz[:, 1] *= env.resolution
-        dists = np.linalg.norm(dxyz, axis=1)
-        mask = dists <= max_edge_len
+        cand_idx = np.asarray(cand, dtype=np.int32)
+        dxyz = metric_pts[cand_idx] - metric_pts[i][None, :]
+        dist2 = np.einsum("ij,ij->i", dxyz, dxyz)
+        mask = dist2 <= max_edge_len2
         if not np.any(mask):
             continue
-        cand_arr = np.asarray(cand, dtype=np.int32)[mask]
-        dist_arr = dists[mask]
-        order = np.argsort(dist_arr)
+        cand_arr = cand_idx[mask]
+        dist_arr = np.sqrt(dist2[mask], dtype=np.float32)
+        order = np.argsort(dist_arr, kind="stable")
         cand_arr = cand_arr[order[:target_unique]]
         added = 0
         for j in cand_arr.tolist():
             if j <= i:
                 continue
             attempted_edges += 1
-            if segment_collision(env, points_xyz[i], points_xyz[j], step=collision_step, clearance=env.min_clearance + float(clearance_margin)):
+            ok, w = _edge_feasible_and_cost_3d(
+                env,
+                points_xyz[i],
+                points_xyz[j],
+                threat_weight=threat_weight,
+                collision_step=collision_step,
+                clearance_margin=clearance_margin,
+            )
+            if not ok:
                 collision_rejects += 1
                 continue
-            w = _edge_cost_3d(env, points_xyz[i], points_xyz[j], threat_weight, collision_step)
             adj[i].append((j, float(w)))
             adj[j].append((i, float(w)))
             added += 1
