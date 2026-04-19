@@ -1,0 +1,96 @@
+##############################
+# Python
+##############################
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments (repo root only)
+/.venv/
+/venv/
+/ENV/
+/env/
+
+# Local env files (secrets / machine-specific)
+.env
+.env.*
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# pip / wheels cache (sometimes created in repo root)
+pip-wheel-metadata/
+
+##############################
+# Jupyter
+##############################
+.ipynb_checkpoints/
+
+##############################
+# OS / Editor
+##############################
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+.vscode/
+.idea/
+
+# Editor swap/backup files
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*~
+
+##############################
+# Project-specific outputs
+##############################
+# Large benchmark artifacts (images/logs/json)
+outputs/
+
+# Sometimes you may create additional output roots during experiments.
+outputs*/
+
+# Terrain datasets can be large; ignore by default.
+# If you want to version terrains, comment this out.
+terrains/
+
+# Common generated artifacts (when running scripts in repo root)
+benchmark_summary.log
+mtoe_debug.log
+*.log
+paths_*.png
+pareto_*.png
+terrain_*.png
+metrics_*.json
+pareto_points_*.json
+
+# Temporary working folders
+work/
+tmp*/
+wandb/
+runs/
+*debug*/
+
+# Large binary artifacts (optional)
+*.npz
+*.npy
+*.pkl
+*.pt
+*.pth
+*.onnx
+*.engine
+*.zip
+
+##############################
+# Cursor / tooling
+##############################
+.cursor/
