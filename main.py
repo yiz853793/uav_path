@@ -12,7 +12,10 @@ from src.algorithms.rrt_star import rrt_star
 from src.algorithms.prm import prm
 from src.algorithms.moead import moead
 from src.viz.plot import plot_env
+<<<<<<< HEAD
 from src.experiment.benchmark_shared import write_mtoe_debug_log
+=======
+>>>>>>> origin/feature/3d
 
 
 def ensure_dir(p: str):
@@ -133,7 +136,11 @@ def main():
     ap.add_argument("--moead_min_gen", type=int, default=20)
     ap.add_argument("--moead_max_gen", type=int, default=None)
     ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
+<<<<<<< HEAD
     ap.add_argument("--mtoe_confidence", type=float, default=0.995)
+=======
+    ap.add_argument("--mtoe_confidence", type=float, default=0.99)
+>>>>>>> origin/feature/3d
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)

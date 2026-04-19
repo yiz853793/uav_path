@@ -281,6 +281,7 @@ class GridEnv:
 
     @staticmethod
     def _structured_city_map(H=1600, W=2000, seed=0, city_density=0.24, terrain_type='city', size_tag='city', use_hills=False, hill_scale=26.0):
+<<<<<<< HEAD
         density_key = _density_key(city_density)
         morphology_seed = _mix_seed_with_density(seed, density_key, salt=11 if use_hills else 7)
         rng = np.random.default_rng(morphology_seed)
@@ -289,6 +290,9 @@ class GridEnv:
         settlement_delta = int(np.round(2.0 * density_morph_bias))
         settlement_min_dist_scale = 1.0 - 0.14 * density_morph_bias
         urban_backbone_mix = float(np.clip(0.26 + 0.08 * density_morph_bias, 0.18, 0.36)) if use_hills else 0.0
+=======
+        rng = np.random.default_rng(int(seed))
+>>>>>>> origin/feature/3d
         yy, xx = np.mgrid[0:H, 0:W]
 
         def box_mean(arr: np.ndarray, radius_y: int, radius_x: int | None = None) -> np.ndarray:
@@ -391,7 +395,11 @@ class GridEnv:
             broad = fbm_2d(H, W, rng, base_grid=max(360, min(H, W) // 4), octaves=3)
             broad = domain_warp(broad, rng, strength=14.0)
             broad = (broad - broad.min()) / (broad.max() - broad.min() + 1e-9)
+<<<<<<< HEAD
             ground += ((broad - 0.50) * rng.uniform(0.55, 0.95) * hill_scale * relief_scale).astype(np.float32)
+=======
+            ground += ((broad - 0.50) * rng.uniform(0.55, 0.95) * hill_scale).astype(np.float32)
+>>>>>>> origin/feature/3d
 
             # Multi-basin lowland system: several moderate lowlands so different directions can develop.
             basin_field = np.zeros((H, W), dtype=np.float32)
@@ -408,7 +416,11 @@ class GridEnv:
                 basin_centers.append((cx, cy))
                 sx = float(rng.uniform(0.13 * W, 0.22 * W))
                 sy = float(rng.uniform(0.11 * H, 0.20 * H))
+<<<<<<< HEAD
                 amp = float(rng.uniform(0.12, 0.26) * hill_scale * (1.0 - 0.12 * density_morph_bias))
+=======
+                amp = float(rng.uniform(0.12, 0.26) * hill_scale)
+>>>>>>> origin/feature/3d
                 basin_field += (amp * np.exp(-(((xx - cx) ** 2) / (2.0 * sx * sx) + ((yy - cy) ** 2) / (2.0 * sy * sy)))).astype(np.float32)
             ground -= basin_field.astype(np.float32)
 
@@ -430,7 +442,11 @@ class GridEnv:
                     cx = float(rng.uniform(0.24 * W, 0.76 * W)); cy = float(rng.uniform(0.28 * H, 0.74 * H))
                 sx = float(rng.uniform(0.12 * W, 0.22 * W))
                 sy = float(rng.uniform(0.12 * H, 0.22 * H))
+<<<<<<< HEAD
                 amp = float(rng.uniform(0.10, 0.28) * hill_scale * relief_scale)
+=======
+                amp = float(rng.uniform(0.10, 0.28) * hill_scale)
+>>>>>>> origin/feature/3d
                 hill_masses.append((cx, cy, sx, sy, amp))
             ground += gaussian_field(hill_masses)
 
@@ -446,7 +462,11 @@ class GridEnv:
                 dy = yy - cy
                 xp = dx * np.cos(local_theta) + dy * np.sin(local_theta)
                 yp = -dx * np.sin(local_theta) + dy * np.cos(local_theta)
+<<<<<<< HEAD
                 ridge_amp = float(rng.uniform(0.03, 0.07) * hill_scale * relief_scale)
+=======
+                ridge_amp = float(rng.uniform(0.03, 0.07) * hill_scale)
+>>>>>>> origin/feature/3d
                 ridge = ridge_amp * np.exp(-((xp ** 2) / (2.0 * length * length) + (yp ** 2) / (2.0 * width * width)))
                 shoulder = (0.55 * ridge_amp) * np.exp(-((xp ** 2) / (2.0 * (length * 1.12) ** 2) + (yp ** 2) / (2.0 * (width * 1.9) ** 2)))
                 ground += (ridge + shoulder).astype(np.float32)
@@ -472,7 +492,11 @@ class GridEnv:
                     continue
                 sx = float(rng.uniform(0.11 * W, 0.18 * W))
                 sy = float(rng.uniform(0.11 * H, 0.18 * H))
+<<<<<<< HEAD
                 amp = float(rng.uniform(0.55, 1.05) * hill_scale * relief_scale)
+=======
+                amp = float(rng.uniform(0.55, 1.05) * hill_scale)
+>>>>>>> origin/feature/3d
                 outer_centers.append((cx, cy, sx, sy, amp))
                 peak_points.append((cx, cy))
             outer_mountain_count = len(outer_centers)
@@ -494,7 +518,11 @@ class GridEnv:
                     bx, by, *_ = outer_centers[i + 1]
                     seg_len = max(float(np.hypot(ax - bx, ay - by)), 1.0)
                     nseg = max(4, int(seg_len / max(1.0, 0.12 * min(H, W))))
+<<<<<<< HEAD
                     ridge_amp = float(rng.uniform(0.03, 0.07) * hill_scale * relief_scale)
+=======
+                    ridge_amp = float(rng.uniform(0.03, 0.07) * hill_scale)
+>>>>>>> origin/feature/3d
                     ridge_s_long = float(rng.uniform(0.08, 0.12) * min(H, W))
                     ridge_s_short = float(rng.uniform(0.05, 0.08) * min(H, W))
                     local_theta = float(np.arctan2(by - ay, bx - ax))
@@ -552,7 +580,11 @@ class GridEnv:
                 + 0.26 * np.exp(-(((x_n - 0.50) ** 2) / (2.0 * 0.22 * 0.22) + ((y_n - 0.63) ** 2) / (2.0 * 0.18 * 0.18)))
             ).astype(np.float32)
             develop_belt = (develop_belt - develop_belt.min()) / (develop_belt.max() - develop_belt.min() + 1e-9)
+<<<<<<< HEAD
             ground -= (develop_belt * rng.uniform(0.16, 0.24) * hill_scale * (1.0 + 0.12 * density_morph_bias)).astype(np.float32)
+=======
+            ground -= (develop_belt * rng.uniform(0.16, 0.24) * hill_scale).astype(np.float32)
+>>>>>>> origin/feature/3d
 
             ground = np.clip(ground, 0.0, None).astype(np.float32)
             gmax = float(np.max(ground))
@@ -635,15 +667,24 @@ class GridEnv:
                 0.10 * central_axis
             ).astype(np.float32)
             urban_backbone = (urban_backbone - urban_backbone.min()) / (urban_backbone.max() - urban_backbone.min() + 1e-9)
+<<<<<<< HEAD
             terrain_suitability = ((1.0 - urban_backbone_mix) * terrain_suitability + urban_backbone_mix * urban_backbone).astype(np.float32)
+=======
+            terrain_suitability = (0.74 * terrain_suitability + 0.26 * urban_backbone).astype(np.float32)
+>>>>>>> origin/feature/3d
             terrain_suitability = (terrain_suitability - terrain_suitability.min()) / (terrain_suitability.max() - terrain_suitability.min() + 1e-9)
         else:
             urban_backbone = np.ones((H, W), dtype=np.float32)
 
+<<<<<<< HEAD
         center_target = int((rng.integers(8, 12) if use_hills else rng.integers(5, 9)) + settlement_delta)
         center_target = max(4 if not use_hills else 6, center_target)
         center_min_dist = (0.09 * settlement_min_dist_scale if use_hills else 0.12 * settlement_min_dist_scale) * min(H, W)
         settlement_centers = select_centers(terrain_suitability, center_target, min_dist=center_min_dist, margin_ratio=0.05 if use_hills else 0.08)
+=======
+        center_target = int(rng.integers(8, 12) if use_hills else rng.integers(5, 9))
+        settlement_centers = select_centers(terrain_suitability, center_target, min_dist=0.09 * min(H, W) if use_hills else 0.12 * min(H, W), margin_ratio=0.05 if use_hills else 0.08)
+>>>>>>> origin/feature/3d
         if not settlement_centers:
             settlement_centers = [(float(W * 0.5), float(H * 0.5))]
 
@@ -1035,10 +1076,13 @@ class GridEnv:
             'highrise_ratio_occ': high,
             'supertall_ratio_occ': supertall,
             'settlement_center_count': int(len(settlement_centers)),
+<<<<<<< HEAD
             'morphology_seed': int(morphology_seed),
             'density_key': int(density_key),
             'density_morph_bias': float(density_morph_bias),
             'density_affects_morphology': True,
+=======
+>>>>>>> origin/feature/3d
         }
         if use_hills:
             meta['hill_scale'] = float(hill_scale)
@@ -1094,6 +1138,7 @@ class GridEnv:
         return env, height, meta
 
 
+<<<<<<< HEAD
 def _density_key(city_density: float) -> int:
     return int(round(float(city_density) * 1000.0))
 
@@ -1110,6 +1155,8 @@ def _mix_seed_with_density(seed: int, density_key: int, salt: int = 0) -> int:
     return int(mixed)
 
 
+=======
+>>>>>>> origin/feature/3d
 def _smoothstep(t: np.ndarray) -> np.ndarray:
     return t * t * (3 - 2 * t)
 

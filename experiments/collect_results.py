@@ -681,7 +681,11 @@ def main():
             long_rows.extend(ls)
         except Exception as e:
             bad += 1
+<<<<<<< HEAD
             print(f"[warn] failed to parse: {p}\n  err={e}", flush=True)
+=======
+            print(f"[warn] failed to parse: {p}\n  err={e}")
+>>>>>>> origin/feature/3d
 
     out_wide = os.path.join(out_dir, "results_wide.csv")
     out_long = os.path.join(out_dir, "results_long.csv")
@@ -691,6 +695,7 @@ def main():
     write_long_csv(long_rows, out_long)
     write_summary_grouped(long_rows, out_sum, group_keys=group_keys, exclude_invalid=args.exclude_invalid)
 
+<<<<<<< HEAD
     print("[collect_results] done", flush=True)
     print("  metrics found     :", len(paths), flush=True)
     print("  parsed ok         :", len(wide_rows), flush=True)
@@ -704,6 +709,21 @@ def main():
         print("  filter size       :", size_allow, flush=True)
     if inflate_allow is not None:
         print("  filter inflate    :", inflate_allow, flush=True)
+=======
+    print("[collect_results] done")
+    print("  metrics found     :", len(paths))
+    print("  parsed ok         :", len(wide_rows))
+    print("  filtered out      :", filtered_out)
+    print("  parsed failed     :", bad)
+    print("  wrote             :", out_wide)
+    print("  wrote             :", out_long)
+    print("  wrote             :", out_sum)
+    print("  group_by          :", ",".join(group_keys))
+    if size_allow is not None:
+        print("  filter size       :", size_allow)
+    if inflate_allow is not None:
+        print("  filter inflate    :", inflate_allow)
+>>>>>>> origin/feature/3d
 
 
 if __name__ == "__main__":

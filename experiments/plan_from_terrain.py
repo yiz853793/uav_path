@@ -6,10 +6,52 @@ from src.env.grid_env import GridEnv
 from src.algorithms.rrt_star import rrt_star
 from src.algorithms.prm import prm
 from src.algorithms.moead import moead
+<<<<<<< HEAD
 from src.experiment.benchmark_shared import default_start_goal_for_env, meters_to_cells, split_moead_log
 from src.experiment.vis_data import build_vis_payload, save_vis_payload
 
 
+=======
+from experiments.vis_data import build_vis_payload, save_vis_payload
+
+
+def split_moead_log(log):
+    log = log if isinstance(log, dict) else {}
+    if not log:
+        return {}, {}
+    metric_keys = {
+        "n_gen", "configured_n_gen", "requested_n_gen", "pop", "K", "T", "n_eval",
+        "archive_size", "max_gen", "moead_min_gen", "mtoe_enabled", "mtoe_mode",
+        "mtoe_tol_fun", "mtoe_confidence", "stop_reason", "mtoe_window", "ideal_point",
+    }
+    metric_log = {k: log[k] for k in metric_keys if k in log}
+    debug_log = {k: v for k, v in log.items() if k not in metric_keys}
+    return metric_log, debug_log
+
+def meters_to_cells(env, value_m: float) -> float:
+    return float(value_m) / float(env.resolution)
+
+def cells_to_meters(env, value_cells: float) -> float:
+    return float(value_cells) * float(env.resolution)
+
+def default_start_goal_for_env(env: GridEnv, height: np.ndarray, z_offset_m: float = 2.0):
+    res = float(env.resolution)
+    sx_m, sy_m = 25.0, 25.0
+    gx_m, gy_m = float(max(25.0 + 50.0, (env.W - 60) * res)), float(max(25.0 + 50.0, (env.H - 70) * res))
+
+    sx = meters_to_cells(env, sx_m)
+    sy = meters_to_cells(env, sy_m)
+    gx = meters_to_cells(env, gx_m)
+    gy = meters_to_cells(env, gy_m)
+
+    sx_i, sy_i = int(np.clip(round(sx), 0, env.W - 1)), int(np.clip(round(sy), 0, env.H - 1))
+    gx_i, gy_i = int(np.clip(round(gx), 0, env.W - 1)), int(np.clip(round(gy), 0, env.H - 1))
+
+    sz = float(height[sy_i, sx_i]) + float(z_offset_m)
+    gz = float(height[gy_i, gx_i]) + float(z_offset_m)
+    return np.array([float(sx_i), float(sy_i), sz], dtype=np.float32), np.array([float(gx_i), float(gy_i), gz], dtype=np.float32)
+
+>>>>>>> origin/feature/3d
 
 def main():
     ap = argparse.ArgumentParser()
@@ -25,7 +67,11 @@ def main():
     ap.add_argument("--moead_min_gen", type=int, default=20)
     ap.add_argument("--moead_max_gen", type=int, default=None)
     ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
+<<<<<<< HEAD
     ap.add_argument("--mtoe_confidence", type=float, default=0.995)
+=======
+    ap.add_argument("--mtoe_confidence", type=float, default=0.99)
+>>>>>>> origin/feature/3d
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)
@@ -96,7 +142,11 @@ def main():
     if args.planner in ("rrt", "all"):
         path_rrt, _ = rrt_star(env, start, goal, n_iter=args.rrt_iter, seed=args.seed)
         if path_rrt is None:
+<<<<<<< HEAD
             print("RRT* failed to find a path.", flush=True)
+=======
+            print("RRT* failed to find a path.")
+>>>>>>> origin/feature/3d
 
     if args.planner in ("prm", "all"):
         path_prm, prm_graph = prm(
@@ -108,9 +158,15 @@ def main():
             seed=args.seed,
         )
         if path_prm is None:
+<<<<<<< HEAD
             print("PRM failed to find a path.", flush=True)
             if prm_graph is not None and getattr(prm_graph, "stats", None):
                 print("PRM stats:", prm_graph.stats, flush=True)
+=======
+            print("PRM failed to find a path.")
+            if prm_graph is not None and getattr(prm_graph, "stats", None):
+                print("PRM stats:", prm_graph.stats)
+>>>>>>> origin/feature/3d
 
     if args.planner in ("moead", "all"):
         _, arch, log = moead(
@@ -159,7 +215,11 @@ def main():
                 "weights": np.array([1.0, 1.0, 1.0], dtype=float) / 3.0,
             }
         metric_log, debug_log = split_moead_log(log)
+<<<<<<< HEAD
         print("log:", metric_log, flush=True)
+=======
+        print("log:", metric_log)
+>>>>>>> origin/feature/3d
 
     out_json = args.out_json.strip()
     if not out_json:
@@ -210,7 +270,11 @@ def main():
         },
     )
     save_vis_payload(out_json, payload)
+<<<<<<< HEAD
     print("saved vis json:", out_json, flush=True)
+=======
+    print("saved vis json:", out_json)
+>>>>>>> origin/feature/3d
 
 
 if __name__ == "__main__":

@@ -771,6 +771,7 @@ def main():
     project_root = Path(args.project_root).resolve()
 
     json_files = collect_json_files(input_path)
+<<<<<<< HEAD
     print(f"Found {len(json_files)} json file(s).", flush=True)
 
     if not json_files:
@@ -779,11 +780,25 @@ def main():
 
     for jp in json_files:
         print(f"[render] {jp}", flush=True)
+=======
+    print(f"Found {len(json_files)} json file(s).")
+
+    if not json_files:
+        print("No visdata_*.json found.")
+        return
+
+    for jp in json_files:
+        print(f"[render] {jp}")
+>>>>>>> origin/feature/3d
 
         try:
             vis = load_json(jp)
         except Exception as e:
+<<<<<<< HEAD
             print(f"  [skip] failed to load json: {e}", flush=True)
+=======
+            print(f"  [skip] failed to load json: {e}")
+>>>>>>> origin/feature/3d
             continue
 
         out_dir = jp.parent
@@ -792,20 +807,35 @@ def main():
         if args.mode in ("static", "all"):
             try:
                 p1, p2, p3 = save_static(vis, jp, out_dir, project_root)
+<<<<<<< HEAD
                 print(f"  static -> {p1}", flush=True)
                 print(f"  static -> {p2}", flush=True)
                 print(f"  static -> {p3}", flush=True)
             except Exception as e:
                 print(f"  [static failed] {e}", flush=True)
+=======
+                print(f"  static -> {p1}")
+                print(f"  static -> {p2}")
+                print(f"  static -> {p3}")
+            except Exception as e:
+                print(f"  [static failed] {e}")
+>>>>>>> origin/feature/3d
 
         if args.mode in ("interactive", "all"):
             try:
                 p5 = save_interactive_paths(vis, jp, out_dir, project_root)
                 p6 = save_interactive_pareto(vis, jp, out_dir)
+<<<<<<< HEAD
                 print(f"  interactive -> {p5}", flush=True)
                 print(f"  interactive -> {p6}", flush=True)
             except Exception as e:
                 print(f"  [interactive failed] {e}", flush=True)
+=======
+                print(f"  interactive -> {p5}")
+                print(f"  interactive -> {p6}")
+            except Exception as e:
+                print(f"  [interactive failed] {e}")
+>>>>>>> origin/feature/3d
 
 
 if __name__ == "__main__":

@@ -17,7 +17,11 @@ from src.algorithms.rrt_star import rrt_star
 from src.algorithms.prm import prm
 from src.algorithms.moead import moead
 from src.models.evaluator import evaluate_path
+<<<<<<< HEAD
 from src.experiment.vis_data import build_vis_payload, save_vis_payload
+=======
+from experiments.vis_data import build_vis_payload, save_vis_payload
+>>>>>>> origin/feature/3d
 
 def meters_to_cells(env, value_m: float) -> float:
     return float(value_m) / float(env.resolution)
@@ -48,7 +52,11 @@ RUN_PROFILES = {
         "prm_max_edge_len": 120.0,
         "prm_threat_weight": 0.0,
         "moead_min_gen": 40,
+<<<<<<< HEAD
         "moead_max_gen": 300,
+=======
+        "moead_max_gen": 200,
+>>>>>>> origin/feature/3d
         "moead_pop": 80,
         "moead_T": 10,
         "active_subproblem_ratio": 0.75,
@@ -65,7 +73,11 @@ RUN_PROFILES = {
         "prm_max_edge_len": 250.0,
         "prm_threat_weight": 0.0,
         "moead_min_gen": 60,
+<<<<<<< HEAD
         "moead_max_gen": 700,
+=======
+        "moead_max_gen": 400,
+>>>>>>> origin/feature/3d
         "moead_pop": 128,
         "moead_T": 14,
         "active_subproblem_ratio": 0.80,
@@ -82,7 +94,11 @@ RUN_PROFILES = {
         "prm_max_edge_len": 280.0,
         "prm_threat_weight": 0.0,
         "moead_min_gen": 80,
+<<<<<<< HEAD
         "moead_max_gen": 1600,
+=======
+        "moead_max_gen": 600,
+>>>>>>> origin/feature/3d
         "moead_pop": 160,
         "moead_T": 16,
         "active_subproblem_ratio": 0.90,
@@ -991,7 +1007,11 @@ def main():
     ap.add_argument("--moead_min_gen", "--gmin", dest="moead_min_gen", type=int, default=20, help="minimum MOEA/D generations before early stop")
     ap.add_argument("--moead_max_gen", "--gmax", dest="moead_max_gen", type=int, default=None, help="maximum MOEA/D generations")
     ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
+<<<<<<< HEAD
     ap.add_argument("--mtoe_confidence", type=float, default=0.995)
+=======
+    ap.add_argument("--mtoe_confidence", type=float, default=0.99)
+>>>>>>> origin/feature/3d
     ap.add_argument("--disable_mtoe_stop", action="store_true", help="run to moead_max_gen but keep recording shadow MTOE stop events")
     ap.add_argument("--basin_shadow_enable", type=int, default=1, help="enable basin-aware shadow monitoring (1/0)")
     ap.add_argument("--basin_band_count", type=int, default=7, help="number of lateral bins for basin signature")
@@ -1122,7 +1142,11 @@ def main():
     for planner_seed in planner_seeds:
         for tp in terrain_files:
             if not os.path.exists(tp):
+<<<<<<< HEAD
                 print("[skip missing]", tp, flush=True)
+=======
+                print("[skip missing]", tp)
+>>>>>>> origin/feature/3d
                 continue
     
             base = os.path.basename(tp)
@@ -1291,7 +1315,11 @@ def main():
                     "rep_objs": None,
                 }
                 all_rows.append(row)
+<<<<<<< HEAD
                 print("[skip-invalid]", base, "reason=", ",".join(reason), "->", out_dir, flush=True)
+=======
+                print("[skip-invalid]", base, "reason=", ",".join(reason), "->", out_dir)
+>>>>>>> origin/feature/3d
                 continue
     
             eval_step_cells = args.moead_eval_step / env.resolution
@@ -1621,6 +1649,7 @@ def main():
             }
             all_rows.append(row)
     
+<<<<<<< HEAD
             print("[done]", base, "->", out_dir, flush=True)
     
     summarize_results(all_rows, summary_log, args, summary_csv_path=summary_csv)
@@ -1628,6 +1657,15 @@ def main():
     print("Benchmark finished.", flush=True)
     print("Summary appended to:", summary_log, flush=True)
     print("Summary CSV:", summary_csv, flush=True)
+=======
+            print("[done]", base, "->", out_dir)
+    
+    summarize_results(all_rows, summary_log, args, summary_csv_path=summary_csv)
+
+    print("Benchmark finished.")
+    print("Summary appended to:", summary_log)
+    print("Summary CSV:", summary_csv)
+>>>>>>> origin/feature/3d
 
 
 if __name__ == "__main__":
