@@ -79,10 +79,6 @@ def _make_file_logger(log_path: str, console: bool = False) -> logging.Logger:
     logger.propagate = False
     return logger
 
-
-<<<<<<< HEAD
-
-
 def _close_logger_handlers(logger: logging.Logger | None) -> None:
     """Flush and close handlers so Windows can rename/delete log files safely."""
     if logger is None:
@@ -101,8 +97,6 @@ def _close_logger_handlers(logger: logging.Logger | None) -> None:
         except Exception:
             pass
 
-=======
->>>>>>> origin/feature/3d
 def _pop_stats(pop_inds: List["Individual"]):
     """Lightweight population statistics for debug logging."""
     n = len(pop_inds)
@@ -2514,11 +2508,8 @@ def moead(
     if stop_reason == "max_gen":
         actual_gens = int(moead_max_gen)
 
-<<<<<<< HEAD
     _close_logger_handlers(logger)
 
-=======
->>>>>>> origin/feature/3d
     log = {
         "n_gen": int(actual_gens),
         "configured_n_gen": int(moead_max_gen),
