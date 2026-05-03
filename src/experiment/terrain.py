@@ -3,7 +3,7 @@ import os
 from typing import Iterable, Tuple
 
 from src.env.grid_env import GridEnv
-from src.experiment.common_io import ensure_dir
+from src.experiment.path_planning import ensure_dir
 
 
 CITY_MAP_SHAPE = (1600, 2000)

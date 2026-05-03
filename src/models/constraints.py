@@ -20,7 +20,7 @@ def violation_bounds(env: GridEnv, path: np.ndarray) -> float:
 
 
 def violation_collision(env: GridEnv, path: np.ndarray, step: float = 0.5) -> float:
-    return 1.0 if path_collision(env, path, step=step) else 0.0
+    return 1.0 if path_collision(env, path, step=step, clearance=0.0) else 0.0
 
 
 def violation_max_turn(env: GridEnv, path: np.ndarray, max_turn_rad: float) -> float:
@@ -70,12 +70,67 @@ def violation_max_pitch(env: GridEnv, path: np.ndarray, max_pitch_rad: float) ->
     return float(np.sum(over, dtype=np.float64))
 
 
-def total_violation(env: GridEnv, path: np.ndarray, max_turn_rad: float, step: float = 0.5, max_pitch_rad: float | None = None) -> tuple[float, dict]:
+def split_violation(
+    env: GridEnv,
+    path: np.ndarray,
+    hard_turn_rad: float,
+    step: float = 0.5,
+    hard_pitch_rad: float | None = None,
+    *,
+    soft_turn_rad: float | None = None,
+    soft_pitch_rad: float | None = None,
+    desired_clearance_margin: float = 2.0,
+    tau_soft: float = 25.0,
+) -> tuple[float, float, bool, dict]:
     vb = violation_bounds(env, path)
     vc = violation_collision(env, path, step=step)
-    vt = violation_max_turn(env, path, max_turn_rad=max_turn_rad)
-    vcl = violation_min_clearance(env, path, sample_step=step)
-    vp = 0.0 if max_pitch_rad is None else violation_max_pitch(env, path, max_pitch_rad=max_pitch_rad)
-    total = vb + 1000.0 * vc + 10.0 * vt + 10.0 * vcl + 10.0 * vp
-    detail = {'bounds': vb, 'collision': vc, 'turn': vt, 'clearance': vcl, 'pitch': vp, 'weighted_total': total}
-    return float(total), detail
+    vt_hard = violation_max_turn(env, path, max_turn_rad=hard_turn_rad)
+    vcl_hard = violation_min_clearance(env, path, sample_step=step, min_clearance=env.min_clearance)
+    vp_hard = 0.0 if hard_pitch_rad is None else violation_max_pitch(env, path, max_pitch_rad=hard_pitch_rad)
+
+    soft_turn_rad = hard_turn_rad if soft_turn_rad is None else min(float(soft_turn_rad), float(hard_turn_rad))
+    vt_soft = violation_max_turn(env, path, max_turn_rad=soft_turn_rad)
+    vcl_soft = violation_min_clearance(
+        env,
+        path,
+        sample_step=step,
+        min_clearance=env.min_clearance + max(0.0, float(desired_clearance_margin)),
+    )
+    if hard_pitch_rad is None:
+        vp_soft = 0.0
+    else:
+        soft_pitch_rad = hard_pitch_rad if soft_pitch_rad is None else min(float(soft_pitch_rad), float(hard_pitch_rad))
+        vp_soft = violation_max_pitch(env, path, max_pitch_rad=soft_pitch_rad)
+
+    hard = float(vb + 1000.0 * vc + 10.0 * vcl_hard + 10.0 * vt_hard + 10.0 * vp_hard)
+    soft = float(5.0 * vcl_soft + 10.0 * vt_soft + 10.0 * vp_soft)
+    feasible = bool(hard < 1e-6 and soft <= float(tau_soft) + 1e-9)
+    total = float(hard + max(0.0, soft - float(tau_soft)))
+    detail = {
+        'bounds': vb,
+        'collision': vc,
+        'turn': vt_hard,
+        'clearance': vcl_hard,
+        'pitch': vp_hard,
+        'turn_soft': vt_soft,
+        'clearance_soft': vcl_soft,
+        'pitch_soft': vp_soft,
+        'hard_violation': hard,
+        'soft_violation': soft,
+        'tau_soft': float(tau_soft),
+        'weighted_total': total,
+    }
+    return hard, soft, feasible, detail
+
+
+def total_violation(env: GridEnv, path: np.ndarray, max_turn_rad: float, step: float = 0.5, max_pitch_rad: float | None = None) -> tuple[float, dict]:
+    hard, soft, _feasible, detail = split_violation(
+        env,
+        path,
+        hard_turn_rad=max_turn_rad,
+        step=step,
+        hard_pitch_rad=max_pitch_rad,
+    )
+    total = float(hard + max(0.0, soft - float(detail['tau_soft'])))
+    detail['weighted_total'] = total
+    return total, detail

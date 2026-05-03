@@ -589,7 +589,9 @@ def _build_stratified_candidate(
 
         if x.shape[1] >= 3:
             base_z = env.min_safe_altitude_at(float(cand_xy[0]), float(cand_xy[1]), clearance=env.min_clearance + 2.0)
-            z = max(base_z, float(start[2] + t * (goal[2] - start[2]) + rng.normal(1.0, 1.5)))
+            # Raise stratified seeds toward z_max so f2 is not biased by low-altitude starts.
+            ref_z = float(start[2] + t * (env.z_max - start[2]) + rng.normal(1.0, 1.5))
+            z = float(np.clip(max(base_z, ref_z), env.z_min, env.z_max))
             x[i] = np.array([cand_xy[0], cand_xy[1], z], dtype=np.float32)
         else:
             x[i, :2] = cand_xy
@@ -624,6 +626,12 @@ def make_initial_population(
     global_random_ratio: float = 0.15,
     eval_sample_step: float = 0.75,
     smooth_collision_step: float = 0.75,
+    max_turn_deg: float = 90.0,
+    soft_turn_deg: float = 60.0,
+    max_pitch_deg: float = 35.0,
+    soft_pitch_deg: float = 25.0,
+    desired_clearance_margin: float = 2.0,
+    tau_soft: float = 25.0,
 ) -> Tuple[List[Individual], dict]:
     """Initialize population and return a lightweight init profile."""
 
@@ -658,6 +666,15 @@ def make_initial_population(
         n_global_random += take
 
     astar_paths: List[np.ndarray] = []
+    eval_kwargs = dict(
+        max_turn_deg=float(max_turn_deg),
+        soft_turn_deg=float(soft_turn_deg),
+        max_pitch_deg=float(max_pitch_deg),
+        soft_pitch_deg=float(soft_pitch_deg),
+        desired_clearance_margin=float(desired_clearance_margin),
+        tau_soft=float(tau_soft),
+        sample_step=float(eval_sample_step),
+    )
     if n_astar > 0:
         t_astar_total0 = time.perf_counter()
 
@@ -751,7 +768,7 @@ def make_initial_population(
                     base = raw3d.astype(np.float32)
                 base = _clip_bounds(env, base)
                 if base.shape[1] >= 3:
-                    base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=2)
+                    base = _enforce_altitude_profile(env, base, clearance_margin=2.0, max_pitch_deg=max_pitch_deg, n_pass=2)
                 base[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
                 base[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
                 profile["astar_backbone_post_s"] += time.perf_counter() - t_post0
@@ -784,16 +801,16 @@ def make_initial_population(
             noise[0] = 0
             noise[-1] = 0
             x = _clip_bounds(env, x + noise)
-            x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+            x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=max_pitch_deg, n_pass=6)
             x = _repair_segment_clearance(env, x, step=0.5, clearance_margin=2.0)
-            x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+            x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=max_pitch_deg, n_pass=6)
             x[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
             x[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
             t_r0 = time.perf_counter()
             x = repair_light(env, x, rng, tries=8)
             profile["repair_s"] += time.perf_counter() - t_r0
             t_e0 = time.perf_counter()
-            er = evaluate_path(env, x, sample_step=eval_sample_step)
+            er = evaluate_path(env, x, **eval_kwargs)
             profile["eval_s"] += time.perf_counter() - t_e0
             init.append(Individual(x=x, er=er))
             profile["astar_jitter_s"] += time.perf_counter() - t0
@@ -812,7 +829,7 @@ def make_initial_population(
         x = repair_light(env, x, rng, tries=6)
         profile["repair_s"] += time.perf_counter() - t_r0
         t_e0 = time.perf_counter()
-        er = evaluate_path(env, x, sample_step=eval_sample_step)
+        er = evaluate_path(env, x, **eval_kwargs)
         profile["eval_s"] += time.perf_counter() - t_e0
         init.append(Individual(x=x, er=er))
         profile["stratified_s"] += time.perf_counter() - t0
@@ -828,16 +845,16 @@ def make_initial_population(
         noise[0] = 0
         noise[-1] = 0
         x = _clip_bounds(env, x + noise)
-        x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+        x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=max_pitch_deg, n_pass=6)
         x = _repair_segment_clearance(env, x, step=0.5, clearance_margin=2.0)
-        x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=35.0, n_pass=6)
+        x = _enforce_altitude_profile(env, x, clearance_margin=2.0, max_pitch_deg=max_pitch_deg, n_pass=6)
         x[0] = np.maximum(start, env.clamp_point(start, clearance=env.min_clearance + 2.0))
         x[-1] = np.maximum(goal, env.clamp_point(goal, clearance=env.min_clearance + 2.0))
         t_r0 = time.perf_counter()
         x = repair_light(env, x, rng, tries=6)
         profile["repair_s"] += time.perf_counter() - t_r0
         t_e0 = time.perf_counter()
-        er = evaluate_path(env, x, sample_step=eval_sample_step)
+        er = evaluate_path(env, x, **eval_kwargs)
         profile["eval_s"] += time.perf_counter() - t_e0
         init.append(Individual(x=x, er=er))
         profile["global_random_s"] += time.perf_counter() - t0
@@ -1611,6 +1628,11 @@ def moead(
     T: int = 10,
     seed: int = 0,
     max_turn_deg: float = 90.0,
+    soft_turn_deg: float = 60.0,
+    max_pitch_deg: float = 35.0,
+    soft_pitch_deg: float = 25.0,
+    desired_clearance_margin: float = 2.0,
+    tau_soft: float = 25.0,
     archive_size: int = 0,
     archive_soft_limit: int = 320,
     archive_grid_bins: int = 0,
@@ -1658,6 +1680,7 @@ def moead(
     moead_max_gen: Optional[int] = None,
     mtoe_tol_fun: float = 1e-5,
     mtoe_confidence: float = 0.99,
+    mtoe_window: int = 10,
     disable_mtoe_stop: bool = False,
     basin_shadow_enable: bool = True,
     basin_band_count: int = 7,
@@ -1698,6 +1721,7 @@ def moead(
         moead_max_gen = moead_min_gen
     mtoe_tol_fun = float(max(1e-12, mtoe_tol_fun))
     mtoe_confidence = float(np.clip(mtoe_confidence, 0.0, 0.999999999))
+    mtoe_window = int(max(2, mtoe_window))
     disable_mtoe_stop = bool(disable_mtoe_stop)
     basin_shadow_enable = bool(basin_shadow_enable)
     basin_band_count = int(max(3, basin_band_count))
@@ -1717,6 +1741,21 @@ def moead(
     escape_stall_window = int(max(3, escape_stall_window))
     escape_injections = int(max(0, escape_injections))
     escape_large_mut_sigma = float(max(1.0, escape_large_mut_sigma))
+    max_turn_deg = float(max_turn_deg)
+    soft_turn_deg = float(min(soft_turn_deg, max_turn_deg))
+    max_pitch_deg = float(max_pitch_deg)
+    soft_pitch_deg = float(min(soft_pitch_deg, max_pitch_deg))
+    desired_clearance_margin = float(max(0.0, desired_clearance_margin))
+    tau_soft = float(max(0.0, tau_soft))
+    eval_kwargs = dict(
+        max_turn_deg=max_turn_deg,
+        soft_turn_deg=soft_turn_deg,
+        max_pitch_deg=max_pitch_deg,
+        soft_pitch_deg=soft_pitch_deg,
+        desired_clearance_margin=desired_clearance_margin,
+        tau_soft=tau_soft,
+        sample_step=eval_sample_step,
+    )
     M = 3
     W = uniform_weights(M, pop, seed=seed, extreme_bias=float(weight_extreme_bias))
     B = build_neighbors(W, T=T)
@@ -1742,6 +1781,12 @@ def moead(
         global_random_ratio=float(init_global_random_ratio),
         eval_sample_step=eval_sample_step,
         smooth_collision_step=smooth_collision_step,
+        max_turn_deg=max_turn_deg,
+        soft_turn_deg=soft_turn_deg,
+        max_pitch_deg=max_pitch_deg,
+        soft_pitch_deg=soft_pitch_deg,
+        desired_clearance_margin=desired_clearance_margin,
+        tau_soft=tau_soft,
     )
     init_s = time.perf_counter() - t_init0
     effective_archive_size = int(archive_size) if int(archive_size) > 0 else int(archive_soft_limit)
@@ -1796,7 +1841,6 @@ def moead(
     stall = np.zeros(pop, dtype=np.float64)
     replace_counts = np.zeros(pop, dtype=np.float64)
 
-    mtoe_window = 10
     mtoe_debug_tail: deque[dict] = deque(maxlen=25)
     mtoe_tests_run = 0
     shadow_stop_events: list[dict] = []
@@ -2040,7 +2084,7 @@ def moead(
                 continue
 
             t_e0 = time.perf_counter()
-            er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+            er_child = evaluate_path(env, child, **eval_kwargs)
             gen_eval_s += (time.perf_counter() - t_e0)
             n_eval += 1
             gen_eval_count += 1
@@ -2081,7 +2125,7 @@ def moead(
                         gen_precheck_reject += 1
                         continue
                     t_e0 = time.perf_counter()
-                    er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                    er_child = evaluate_path(env, child, **eval_kwargs)
                     gen_eval_s += (time.perf_counter() - t_e0)
                     n_eval += 1
                     gen_eval_count += 1
@@ -2118,7 +2162,7 @@ def moead(
                         gen_precheck_reject += 1
                         continue
                     t_e0 = time.perf_counter()
-                    er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                    er_child = evaluate_path(env, child, **eval_kwargs)
                     gen_eval_s += (time.perf_counter() - t_e0)
                     n_eval += 1
                     gen_eval_count += 1
@@ -2188,7 +2232,7 @@ def moead(
                     gen_precheck_reject += 1
                     continue
                 t_e0 = time.perf_counter()
-                er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                er_child = evaluate_path(env, child, **eval_kwargs)
                 gen_eval_s += (time.perf_counter() - t_e0)
                 n_eval += 1
                 gen_eval_count += 1
@@ -2414,7 +2458,7 @@ def moead(
                         if not _cheap_candidate_precheck(env, child, parent=pop_inds[target].x, threat_mean=threat_mean, threat_std=threat_std):
                             gen_precheck_reject += 1
                             continue
-                        er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                        er_child = evaluate_path(env, child, **eval_kwargs)
                         n_eval += 1
                         gen_eval_count += 1
                         gen_escape_eval += 1
@@ -2441,7 +2485,7 @@ def moead(
                         if not _cheap_candidate_precheck(env, child, parent=pop_inds[target].x, threat_mean=threat_mean, threat_std=threat_std):
                             gen_precheck_reject += 1
                             continue
-                        er_child = evaluate_path(env, child, max_turn_deg=max_turn_deg, sample_step=eval_sample_step)
+                        er_child = evaluate_path(env, child, **eval_kwargs)
                         n_eval += 1
                         gen_eval_count += 1
                         gen_escape_eval += 1
@@ -2551,5 +2595,13 @@ def moead(
         "ideal_point": z.tolist(),
         "init_profile": dict(init_profile),
         "init_s": float(init_s),
+        "constraints": {
+            "max_turn_deg": float(max_turn_deg),
+            "soft_turn_deg": float(soft_turn_deg),
+            "max_pitch_deg": float(max_pitch_deg),
+            "soft_pitch_deg": float(soft_pitch_deg),
+            "desired_clearance_margin": float(desired_clearance_margin),
+            "tau_soft": float(tau_soft),
+        },
     }
     return pop_inds, archive, log

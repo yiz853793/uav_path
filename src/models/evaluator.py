@@ -11,13 +11,19 @@ class EvalResult:
     feasible: bool
     violation: float
     detail: dict
+    hard_violation: float = 0.0
+    soft_violation: float = 0.0
 
 
 def evaluate_path(
     env: GridEnv,
     path: np.ndarray,
     max_turn_deg: float = 90.0,
+    soft_turn_deg: float = 60.0,
     max_pitch_deg: float = 35.0,
+    soft_pitch_deg: float = 25.0,
+    desired_clearance_margin: float = 2.0,
+    tau_soft: float = 25.0,
     sample_step: float = 0.5,
     k_energy_turn: float = 5.0,
     k_energy_climb: float = 2.0,
@@ -27,7 +33,11 @@ def evaluate_path(
         path = env.lift_path_to_3d(path)
 
     max_turn_rad = float(max_turn_deg) * np.pi / 180.0
+    soft_turn_rad = min(float(soft_turn_deg) * np.pi / 180.0, max_turn_rad)
     max_pitch_rad = float(max_pitch_deg) * np.pi / 180.0
+    soft_pitch_rad = min(float(soft_pitch_deg) * np.pi / 180.0, max_pitch_rad)
+    desired_clearance = float(env.min_clearance) + max(0.0, float(desired_clearance_margin))
+    tau_soft = float(tau_soft)
 
     mpath = env.metric_path(path)
     seg = mpath[1:] - mpath[:-1]
@@ -46,18 +56,22 @@ def evaluate_path(
             c = np.clip(c, -1.0, 1.0)
             ang = np.arccos(c)
             smooth = float(np.sum(ang, dtype=np.float64))
-            vt = float(np.sum(np.maximum(0.0, ang - max_turn_rad), dtype=np.float64))
+            vt_soft = float(np.sum(np.maximum(0.0, ang - soft_turn_rad), dtype=np.float64))
+            vt_hard = float(np.sum(np.maximum(0.0, ang - max_turn_rad), dtype=np.float64))
         else:
             smooth = 0.0
-            vt = 0.0
+            vt_soft = 0.0
+            vt_hard = 0.0
     else:
         smooth = 0.0
-        vt = 0.0
+        vt_soft = 0.0
+        vt_hard = 0.0
 
     dxy = np.linalg.norm(np.diff(mpath[:, :2], axis=0), axis=1)
     dz = np.abs(np.diff(path[:, 2]))
     pitch = np.arctan2(dz, np.maximum(1e-9, dxy)) if len(path) >= 2 else np.zeros((0,), dtype=np.float32)
-    vp = float(np.sum(np.maximum(0.0, pitch - max_pitch_rad), dtype=np.float64))
+    vp_soft = float(np.sum(np.maximum(0.0, pitch - soft_pitch_rad), dtype=np.float64))
+    vp_hard = float(np.sum(np.maximum(0.0, pitch - max_pitch_rad), dtype=np.float64))
 
     x = path[:, 0]
     y = path[:, 1]
@@ -87,31 +101,53 @@ def evaluate_path(
     if path.shape[1] < 3:
         if (not collision) and bool(np.any(env.occupancy[iy2, ix2])):
             collision = True
-        clearance_violation = 0.0
+        clearance_hard = 0.0
+        clearance_soft = 0.0
         f2 = float(np.sum(env.threat[iy2, ix2], dtype=np.float64))
     else:
         ground = env.height[iy2, ix2]
-        req = ground + env.min_clearance
-        clearance_violation = float(np.sum(np.maximum(0.0, req - pts[:, 2]), dtype=np.float64))
-        if (not collision) and bool(np.any(pts[:, 2] < req)):
+        collision_depth = float(np.sum(np.maximum(0.0, ground - pts[:, 2]), dtype=np.float64))
+        if (not collision) and bool(np.any(pts[:, 2] < ground)):
             collision = True
+        req_min = ground + float(env.min_clearance)
+        req_safe = ground + desired_clearance
+        clearance_hard = float(np.sum(np.maximum(0.0, req_min - pts[:, 2]), dtype=np.float64))
+        clearance_soft = float(np.sum(np.maximum(0.0, req_safe - pts[:, 2]), dtype=np.float64))
         clearance = np.maximum(0.0, pts[:, 2] - ground)
         weight = np.exp(-0.06 * clearance)
         f2 = float(np.sum(env.threat[iy2, ix2] * weight, dtype=np.float64))
+        if collision_depth > 0.0:
+            clearance_hard += collision_depth
 
     vc = 1.0 if collision else 0.0
     climb = float(np.sum(np.maximum(0.0, np.diff(path[:, 2])), dtype=np.float64))
     f3 = float(f1 + float(k_energy_turn) * smooth + float(k_energy_climb) * climb)
-    viol = float(vb + 1000.0 * vc + 10.0 * vt + 10.0 * vp + 10.0 * clearance_violation)
+    hard_violation = float(vb + 1000.0 * vc + 10.0 * clearance_hard + 10.0 * vt_hard + 10.0 * vp_hard)
+    soft_violation = float(5.0 * clearance_soft + 10.0 * vt_soft + 10.0 * vp_soft)
+    soft_excess = max(0.0, soft_violation - tau_soft)
+    viol = float(hard_violation + soft_excess)
     detail = {
         'bounds': float(vb),
         'collision': float(vc),
-        'turn': float(vt),
-        'pitch': float(vp),
-        'clearance': float(clearance_violation),
+        'turn': float(vt_hard),
+        'pitch': float(vp_hard),
+        'clearance': float(clearance_hard),
+        'turn_soft': float(vt_soft),
+        'pitch_soft': float(vp_soft),
+        'clearance_soft': float(clearance_soft),
+        'hard_violation': float(hard_violation),
+        'soft_violation': float(soft_violation),
+        'tau_soft': float(tau_soft),
         'weighted_total': float(viol),
         'smoothness': float(smooth),
         'climb': float(climb),
     }
-    feasible = (vc < 0.5) and (vb < 1e-6) and (vt < 1e-6) and (vp < 1e-6) and (clearance_violation < 1e-6)
-    return EvalResult(obj=np.array([f1, f2, f3], dtype=np.float64), feasible=bool(feasible), violation=float(viol), detail=detail)
+    feasible = (hard_violation < 1e-6) and (soft_violation <= tau_soft + 1e-9)
+    return EvalResult(
+        obj=np.array([f1, f2, f3], dtype=np.float64),
+        feasible=bool(feasible),
+        violation=float(viol),
+        detail=detail,
+        hard_violation=float(hard_violation),
+        soft_violation=float(soft_violation),
+    )

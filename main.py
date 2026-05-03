@@ -12,10 +12,7 @@ from src.algorithms.rrt_star import rrt_star
 from src.algorithms.prm import prm
 from src.algorithms.moead import moead
 from src.viz.plot import plot_env
-<<<<<<< HEAD
-from src.experiment.benchmark_shared import write_mtoe_debug_log
-=======
->>>>>>> origin/feature/3d
+from src.experiment.path_planning import write_mtoe_debug_log
 
 
 def ensure_dir(p: str):
@@ -136,11 +133,8 @@ def main():
     ap.add_argument("--moead_min_gen", type=int, default=20)
     ap.add_argument("--moead_max_gen", type=int, default=None)
     ap.add_argument("--mtoe_tol_fun", type=float, default=1e-5)
-<<<<<<< HEAD
     ap.add_argument("--mtoe_confidence", type=float, default=0.995)
-=======
-    ap.add_argument("--mtoe_confidence", type=float, default=0.99)
->>>>>>> origin/feature/3d
+    ap.add_argument("--mtoe_window", type=int, default=10, help="MTOE early-stop rolling window size")
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)
@@ -165,6 +159,12 @@ def main():
     ap.add_argument("--local_search_interval", type=int, default=10)
     ap.add_argument("--local_search_elite_k", type=int, default=3)
     ap.add_argument("--local_search_attempts_per_obj", type=int, default=2)
+    ap.add_argument("--max_turn_deg", type=float, default=90.0, help="hard turn-angle limit in degrees")
+    ap.add_argument("--soft_turn_deg", type=float, default=60.0, help="soft preferred turn-angle limit in degrees")
+    ap.add_argument("--max_pitch_deg", type=float, default=35.0, help="hard pitch-angle limit in degrees")
+    ap.add_argument("--soft_pitch_deg", type=float, default=25.0, help="soft preferred pitch-angle limit in degrees")
+    ap.add_argument("--desired_clearance_margin", type=float, default=2.0, help="extra preferred clearance above min_clearance")
+    ap.add_argument("--tau_soft", type=float, default=25.0, help="maximum allowed weighted soft-constraint violation")
     ap.add_argument("--archive_size", type=int, default=0, help="MOEA/D archive upper bound (>0 uses hard cap; <=0 falls back to archive_soft_limit)")
     ap.add_argument("--archive_soft_limit", type=int, default=320, help="soft archive cap used when archive_size<=0; improves Pareto spread")
     ap.add_argument("--archive_grid_bins", type=int, default=0, help="objective-space grid bins for diversity-aware archive truncation (0=auto)")
@@ -277,10 +277,17 @@ def main():
     _, arch, log = moead(
         env, start, goal,
         n_gen=args.moead_max_gen, pop=args.moead_pop, K=args.K, T=args.moead_T, seed=args.planner_seed,
+        max_turn_deg=args.max_turn_deg,
+        soft_turn_deg=args.soft_turn_deg,
+        max_pitch_deg=args.max_pitch_deg,
+        soft_pitch_deg=args.soft_pitch_deg,
+        desired_clearance_margin=args.desired_clearance_margin,
+        tau_soft=args.tau_soft,
         moead_min_gen=args.moead_min_gen,
         moead_max_gen=args.moead_max_gen,
         mtoe_tol_fun=args.mtoe_tol_fun,
         mtoe_confidence=args.mtoe_confidence,
+        mtoe_window=args.mtoe_window,
         init_astar_ratio=args.init_astar_ratio,
         init_astar_threat_weight=args.init_astar_threat_weight,
         init_astar_jitter_sigma=args.init_astar_jitter_sigma,
@@ -328,10 +335,17 @@ def main():
             "moead_max_gen": args.moead_max_gen,
             "mtoe_tol_fun": args.mtoe_tol_fun,
             "mtoe_confidence": args.mtoe_confidence,
+            "mtoe_window": args.mtoe_window,
             "archive_size": args.archive_size,
             "archive_soft_limit": args.archive_soft_limit,
             "archive_grid_bins": args.archive_grid_bins,
             "archive_keep_extremes": int(args.archive_keep_extremes),
+            "max_turn_deg": args.max_turn_deg,
+            "soft_turn_deg": args.soft_turn_deg,
+            "max_pitch_deg": args.max_pitch_deg,
+            "soft_pitch_deg": args.soft_pitch_deg,
+            "desired_clearance_margin": args.desired_clearance_margin,
+            "tau_soft": args.tau_soft,
             "utility_update_interval": args.utility_update_interval,
             "utility_use_archive_density": int(args.utility_use_archive_density),
             "log_flush_every": args.log_flush_every,
