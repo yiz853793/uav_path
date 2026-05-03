@@ -11,6 +11,19 @@ from src.experiment.path_planning import ensure_dir, parse_benchmark_args, run_s
 
 
 def split_args(argv: List[str]) -> tuple[argparse.Namespace, List[str]]:
+    if any(token in {"--help", "-h"} for token in argv):
+        parser = argparse.ArgumentParser(
+            description="Run one planning case from an existing terrain .npz file.",
+        )
+        parser.add_argument("--terrain", required=True, help="path to one .npz terrain file")
+        parser.add_argument("--out_root", "-o", default="outputs", help="output root")
+        parser.add_argument("--single_case_out_dir", default="", help="write this case directly into this directory")
+        parser.add_argument("--planner_seed", "--seed", dest="planner_seed", type=int, default=0)
+        parser.add_argument("--out_json", default="", help="optional compatibility alias for the generated visdata json path")
+        parser.print_help()
+        print("\nForwarded benchmark-style options include --profile, --inflate, --rrt_iter, --prm_samples, --moead_pop, --moead_max_gen, --K, --moead_T, etc.")
+        raise SystemExit(0)
+
     parser = argparse.ArgumentParser(
         add_help=False,
         description="Run one planning case from an existing terrain .npz file.",
@@ -20,12 +33,7 @@ def split_args(argv: List[str]) -> tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--single_case_out_dir", default="", help="write this case directly into this directory")
     parser.add_argument("--planner_seed", "--seed", dest="planner_seed", type=int, default=0)
     parser.add_argument("--out_json", default="", help="optional compatibility alias for the generated visdata json path")
-    parser.add_argument("--help", "-h", action="store_true")
     front, bench_args = parser.parse_known_args(argv)
-    if front.help:
-        parser.print_help()
-        print("\nForwarded benchmark-style options include --profile, --inflate, --rrt_iter, --prm_samples, --moead_pop, --moead_max_gen, --K, --moead_T, etc.")
-        raise SystemExit(0)
     if bench_args and bench_args[0] == "--":
         bench_args = bench_args[1:]
     return front, bench_args
