@@ -265,6 +265,20 @@ class CaseRowWide:
     rrt_f3: float
     rrt_feasible: int
     rrt_violation: float
+    rrt_candidate_count: int
+    rrt_archive_size: int
+    rrt_feasible_archive_size: int
+    rrt_unique_archive_size: int
+    rrt_representative_unique_count: int
+
+    # Improved RRT*
+    improved_rrt_found: int
+    improved_rrt_ms: float
+    improved_rrt_f1: float
+    improved_rrt_f2: float
+    improved_rrt_f3: float
+    improved_rrt_feasible: int
+    improved_rrt_violation: float
 
     # PRM
     prm_found: int
@@ -274,10 +288,19 @@ class CaseRowWide:
     prm_f3: float
     prm_feasible: int
     prm_violation: float
+    prm_candidate_count: int
+    prm_archive_size: int
+    prm_feasible_archive_size: int
+    prm_unique_archive_size: int
+    prm_representative_unique_count: int
 
     # MOEA/D core
     moead_archive_size: int
     moead_ms: float
+
+    # NSGA-III core
+    nsga3_archive_size: int
+    nsga3_ms: float
 
     # MOEA/D reps
     moead_min_f1_f1: float
@@ -295,6 +318,23 @@ class CaseRowWide:
     moead_comp_f1: float
     moead_comp_f2: float
     moead_comp_f3: float
+
+    # NSGA-III reps
+    nsga3_min_f1_f1: float
+    nsga3_min_f1_f2: float
+    nsga3_min_f1_f3: float
+
+    nsga3_min_f2_f1: float
+    nsga3_min_f2_f2: float
+    nsga3_min_f2_f3: float
+
+    nsga3_min_f3_f1: float
+    nsga3_min_f3_f2: float
+    nsga3_min_f3_f3: float
+
+    nsga3_comp_f1: float
+    nsga3_comp_f2: float
+    nsga3_comp_f3: float
 
 
 @dataclass
@@ -343,6 +383,21 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
     moead_params = extract_moead_params(data)
     moead_cfg = moead_cfg_signature(moead_params)
 
+    def baseline_representative_unique_count(block: Dict[str, Any]) -> int:
+        reps = block.get("representatives", None) if isinstance(block, dict) else None
+        if not isinstance(reps, dict):
+            return 0
+        unique = set()
+        for item in reps.values():
+            if isinstance(item, dict):
+                obj = item.get("obj", item.get("f", None))
+            else:
+                obj = item
+            o = obj3_from_json(obj)
+            if not all(math.isinf(v) for v in o):
+                unique.add(tuple(round(float(v), 6) for v in o[:3]))
+        return len(unique)
+
     # ---- RRT ----
     rrt = data.get("rrt", {}) if isinstance(data.get("rrt", {}), dict) else {}
     rrt_found = 1 if bool(rrt.get("found", False)) else 0
@@ -350,6 +405,19 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
     rrt_obj = obj3_from_json(rrt.get("obj", None))
     rrt_feasible = 1 if bool(rrt.get("feasible", False)) else 0
     rrt_violation = to_float_or_inf(rrt.get("violation", None))
+    rrt_candidate_count = int(to_float_or_inf(rrt.get("candidate_count", 0)))
+    rrt_archive_size = int(to_float_or_inf(rrt.get("archive_size", 0)))
+    rrt_feasible_archive_size = int(to_float_or_inf(rrt.get("feasible_archive_size", 0)))
+    rrt_unique_archive_size = int(to_float_or_inf(rrt.get("unique_archive_size", 0)))
+    rrt_representative_unique_count = int(to_float_or_inf(rrt.get("representative_unique_count", 0))) or baseline_representative_unique_count(rrt)
+
+    # ---- Improved RRT ----
+    improved_rrt = data.get("improved_rrt", {}) if isinstance(data.get("improved_rrt", {}), dict) else {}
+    improved_rrt_found = 1 if bool(improved_rrt.get("found", False)) else 0
+    improved_rrt_ms = to_float_or_inf(improved_rrt.get("runtime_ms", 0.0))
+    improved_rrt_obj = obj3_from_json(improved_rrt.get("obj", None))
+    improved_rrt_feasible = 1 if bool(improved_rrt.get("feasible", False)) else 0
+    improved_rrt_violation = to_float_or_inf(improved_rrt.get("violation", None))
 
     # ---- PRM ----
     prm = data.get("prm", {}) if isinstance(data.get("prm", {}), dict) else {}
@@ -358,6 +426,11 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
     prm_obj = obj3_from_json(prm.get("obj", None))
     prm_feasible = 1 if bool(prm.get("feasible", False)) else 0
     prm_violation = to_float_or_inf(prm.get("violation", None))
+    prm_candidate_count = int(to_float_or_inf(prm.get("candidate_count", 0)))
+    prm_archive_size = int(to_float_or_inf(prm.get("archive_size", 0)))
+    prm_feasible_archive_size = int(to_float_or_inf(prm.get("feasible_archive_size", 0)))
+    prm_unique_archive_size = int(to_float_or_inf(prm.get("unique_archive_size", 0)))
+    prm_representative_unique_count = int(to_float_or_inf(prm.get("representative_unique_count", 0))) or baseline_representative_unique_count(prm)
 
     # ---- MOEAD ----
     moead = data.get("moead", {}) if isinstance(data.get("moead", {}), dict) else {}
@@ -372,6 +445,20 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
     rep_min_f2 = obj3_from_json(reps.get("min_f2"))
     rep_min_f3 = obj3_from_json(reps.get("min_f3"))
     rep_comp = obj3_from_json(reps.get("compromise"))
+
+    # ---- NSGA-III ----
+    nsga3 = data.get("nsga3", {}) if isinstance(data.get("nsga3", {}), dict) else {}
+    nsga3_ms = to_float_or_inf(nsga3.get("runtime_ms", 0.0))
+    nsga3_archive_size = int(to_float_or_inf(nsga3.get("archive_size", 0)))
+
+    nsga3_reps = nsga3.get("representatives", None)
+    if not isinstance(nsga3_reps, dict):
+        nsga3_reps = {}
+
+    nsga3_rep_min_f1 = obj3_from_json(nsga3_reps.get("min_f1"))
+    nsga3_rep_min_f2 = obj3_from_json(nsga3_reps.get("min_f2"))
+    nsga3_rep_min_f3 = obj3_from_json(nsga3_reps.get("min_f3"))
+    nsga3_rep_comp = obj3_from_json(nsga3_reps.get("compromise"))
 
     wide = CaseRowWide(
         metrics_path=path,
@@ -394,6 +481,19 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
         rrt_f3=rrt_obj[2],
         rrt_feasible=rrt_feasible,
         rrt_violation=rrt_violation,
+        rrt_candidate_count=rrt_candidate_count,
+        rrt_archive_size=rrt_archive_size,
+        rrt_feasible_archive_size=rrt_feasible_archive_size,
+        rrt_unique_archive_size=rrt_unique_archive_size,
+        rrt_representative_unique_count=rrt_representative_unique_count,
+
+        improved_rrt_found=improved_rrt_found,
+        improved_rrt_ms=improved_rrt_ms,
+        improved_rrt_f1=improved_rrt_obj[0],
+        improved_rrt_f2=improved_rrt_obj[1],
+        improved_rrt_f3=improved_rrt_obj[2],
+        improved_rrt_feasible=improved_rrt_feasible,
+        improved_rrt_violation=improved_rrt_violation,
 
         prm_found=prm_found,
         prm_ms=prm_ms,
@@ -402,9 +502,17 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
         prm_f3=prm_obj[2],
         prm_feasible=prm_feasible,
         prm_violation=prm_violation,
+        prm_candidate_count=prm_candidate_count,
+        prm_archive_size=prm_archive_size,
+        prm_feasible_archive_size=prm_feasible_archive_size,
+        prm_unique_archive_size=prm_unique_archive_size,
+        prm_representative_unique_count=prm_representative_unique_count,
 
         moead_archive_size=moead_archive_size,
         moead_ms=moead_ms,
+
+        nsga3_archive_size=nsga3_archive_size,
+        nsga3_ms=nsga3_ms,
 
         moead_min_f1_f1=rep_min_f1[0],
         moead_min_f1_f2=rep_min_f1[1],
@@ -421,6 +529,22 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
         moead_comp_f1=rep_comp[0],
         moead_comp_f2=rep_comp[1],
         moead_comp_f3=rep_comp[2],
+
+        nsga3_min_f1_f1=nsga3_rep_min_f1[0],
+        nsga3_min_f1_f2=nsga3_rep_min_f1[1],
+        nsga3_min_f1_f3=nsga3_rep_min_f1[2],
+
+        nsga3_min_f2_f1=nsga3_rep_min_f2[0],
+        nsga3_min_f2_f2=nsga3_rep_min_f2[1],
+        nsga3_min_f2_f3=nsga3_rep_min_f2[2],
+
+        nsga3_min_f3_f1=nsga3_rep_min_f3[0],
+        nsga3_min_f3_f2=nsga3_rep_min_f3[1],
+        nsga3_min_f3_f3=nsga3_rep_min_f3[2],
+
+        nsga3_comp_f1=nsga3_rep_comp[0],
+        nsga3_comp_f2=nsga3_rep_comp[1],
+        nsga3_comp_f3=nsga3_rep_comp[2],
     )
 
     long_rows: List[CaseRowLong] = []
@@ -447,6 +571,60 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
         f3=wide.rrt_f3,
     ))
 
+    def baseline_rep_obj(block: Dict[str, Any], name: str) -> Tuple[float, float, float]:
+        reps = block.get("representatives", None) if isinstance(block, dict) else None
+        if not isinstance(reps, dict):
+            return (float("inf"), float("inf"), float("inf"))
+        item = reps.get(name)
+        if isinstance(item, dict):
+            return obj3_from_json(item.get("obj", item.get("f", None)))
+        return obj3_from_json(item)
+
+    for rep_name in ("min_f1", "min_f2", "min_f3", "compromise"):
+        o = baseline_rep_obj(rrt, rep_name)
+        if all(math.isinf(v) for v in o):
+            continue
+        long_rows.append(CaseRowLong(
+            metrics_path=path,
+            terrain_file=terrain_file,
+            terrain_seed=terrain_seed,
+            planner_seed=planner_seed,
+            size_tag=size_tag,
+            variant=variant,
+            H=H,
+            W=W,
+            inflate=inflate,
+            invalid_case=invalid_case,
+            moead_cfg=moead_cfg,
+
+            method=f"RRT*_{rep_name}",
+            found=1,
+            runtime_ms=rrt_ms,
+            f1=o[0], f2=o[1], f3=o[2],
+        ))
+
+    # Improved RRT*
+    long_rows.append(CaseRowLong(
+        metrics_path=path,
+        terrain_file=terrain_file,
+        terrain_seed=terrain_seed,
+        planner_seed=planner_seed,
+        size_tag=size_tag,
+        variant=variant,
+        H=H,
+        W=W,
+        inflate=inflate,
+        invalid_case=invalid_case,
+        moead_cfg=moead_cfg,
+
+        method="Improved RRT*",
+        found=improved_rrt_found,
+        runtime_ms=improved_rrt_ms,
+        f1=wide.improved_rrt_f1,
+        f2=wide.improved_rrt_f2,
+        f3=wide.improved_rrt_f3,
+    ))
+
     # PRM
     long_rows.append(CaseRowLong(
         metrics_path=path,
@@ -469,9 +647,39 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
         f3=wide.prm_f3,
     ))
 
+    for rep_name in ("min_f1", "min_f2", "min_f3", "compromise"):
+        o = baseline_rep_obj(prm, rep_name)
+        if all(math.isinf(v) for v in o):
+            continue
+        long_rows.append(CaseRowLong(
+            metrics_path=path,
+            terrain_file=terrain_file,
+            terrain_seed=terrain_seed,
+            planner_seed=planner_seed,
+            size_tag=size_tag,
+            variant=variant,
+            H=H,
+            W=W,
+            inflate=inflate,
+            invalid_case=invalid_case,
+            moead_cfg=moead_cfg,
+
+            method=f"PRM_{rep_name}",
+            found=1,
+            runtime_ms=prm_ms,
+            f1=o[0], f2=o[1], f3=o[2],
+        ))
+
     # MOEAD reps found flags
     def moead_found_from_obj(o: Tuple[float, float, float]) -> int:
         if moead_archive_size <= 0:
+            return 0
+        if all(math.isinf(x) for x in o):
+            return 0
+        return 1
+
+    def nsga3_found_from_obj(o: Tuple[float, float, float]) -> int:
+        if nsga3_archive_size <= 0:
             return 0
         if all(math.isinf(x) for x in o):
             return 0
@@ -499,6 +707,31 @@ def parse_one_metrics(path: str) -> Tuple[CaseRowWide, List[CaseRowLong]]:
             method=name,
             found=moead_found_from_obj(o),
             runtime_ms=moead_ms,
+            f1=o[0], f2=o[1], f3=o[2],
+        ))
+
+    for name, o in [
+        ("NSGA-III-min_f1", nsga3_rep_min_f1),
+        ("NSGA-III-min_f2", nsga3_rep_min_f2),
+        ("NSGA-III-min_f3", nsga3_rep_min_f3),
+        ("NSGA-III-compromise", nsga3_rep_comp),
+    ]:
+        long_rows.append(CaseRowLong(
+            metrics_path=path,
+            terrain_file=terrain_file,
+            terrain_seed=terrain_seed,
+            planner_seed=planner_seed,
+            size_tag=size_tag,
+            variant=variant,
+            H=H,
+            W=W,
+            inflate=inflate,
+            invalid_case=invalid_case,
+            moead_cfg=moead_cfg,
+
+            method=name,
+            found=nsga3_found_from_obj(o),
+            runtime_ms=nsga3_ms,
             f1=o[0], f2=o[1], f3=o[2],
         ))
 
@@ -677,8 +910,15 @@ MOEAD_REP_FIELDS = {
     "min_f3": ("moead_min_f3_f1", "moead_min_f3_f2", "moead_min_f3_f3"),
     "compromise": ("moead_comp_f1", "moead_comp_f2", "moead_comp_f3"),
 }
+NSGA3_REP_FIELDS = {
+    "min_f1": ("nsga3_min_f1_f1", "nsga3_min_f1_f2", "nsga3_min_f1_f3"),
+    "min_f2": ("nsga3_min_f2_f1", "nsga3_min_f2_f2", "nsga3_min_f2_f3"),
+    "min_f3": ("nsga3_min_f3_f1", "nsga3_min_f3_f2", "nsga3_min_f3_f3"),
+    "compromise": ("nsga3_comp_f1", "nsga3_comp_f2", "nsga3_comp_f3"),
+}
 BASELINE_FIELDS = {
     "RRT*": ("rrt_found", "rrt_f1", "rrt_f2", "rrt_f3"),
+    "Improved RRT*": ("improved_rrt_found", "improved_rrt_f1", "improved_rrt_f2", "improved_rrt_f3"),
     "PRM": ("prm_found", "prm_f1", "prm_f2", "prm_f3"),
 }
 METRIC_NAMES = ["f1", "f2", "f3"]
@@ -749,6 +989,42 @@ def paired_case_rows(wide_rows: List[CaseRowWide], exclude_invalid: bool = True)
                         "terrain_seed": w.terrain_seed if w.terrain_seed is not None else -1,
                         "planner_seed": w.planner_seed if w.planner_seed is not None else -1,
                         "baseline": baseline_name,
+                        "baseline_rep": "single",
+                        "moead_rep": rep_name,
+                        "metric": metric,
+                        "baseline_value": b,
+                        "moead_value": m,
+                        "improve_pct": improve_pct,
+                        "gap_pct": -improve_pct,
+                        "win": 1 if improve_pct > 0 else 0,
+                        "tie_or_win": 1 if improve_pct >= 0 else 0,
+                        "metrics_path": w.metrics_path,
+                    })
+
+        if int(w.nsga3_archive_size) > 0:
+            for rep_name, nsga3_fields in NSGA3_REP_FIELDS.items():
+                moead_fields = MOEAD_REP_FIELDS.get(rep_name)
+                if moead_fields is None:
+                    continue
+                baseline_values = [getattr(w, nsga3_fields[0]), getattr(w, nsga3_fields[1]), getattr(w, nsga3_fields[2])]
+                moead_values = [getattr(w, moead_fields[0]), getattr(w, moead_fields[1]), getattr(w, moead_fields[2])]
+                for idx, metric in enumerate(METRIC_NAMES):
+                    b = baseline_values[idx]
+                    m = moead_values[idx]
+                    if not is_finite_number(b) or not is_finite_number(m):
+                        continue
+                    b = float(b)
+                    m = float(m)
+                    if abs(b) < 1e-12:
+                        continue
+                    improve_pct = (b - m) / abs(b) * 100.0
+                    rows.append({
+                        "size_tag": w.size_tag,
+                        "variant": w.variant,
+                        "terrain_seed": w.terrain_seed if w.terrain_seed is not None else -1,
+                        "planner_seed": w.planner_seed if w.planner_seed is not None else -1,
+                        "baseline": "NSGA-III",
+                        "baseline_rep": rep_name,
                         "moead_rep": rep_name,
                         "metric": metric,
                         "baseline_value": b,
@@ -856,15 +1132,15 @@ def write_paired_outputs(wide_rows: List[CaseRowWide], out_dir: str, exclude_inv
     paired = paired_case_rows(wide_rows, exclude_invalid=exclude_invalid)
     paired_by_seed = aggregate_paired_rows(
         paired,
-        ["variant", "size_tag", "terrain_seed", "baseline", "moead_rep", "metric"],
+        ["variant", "size_tag", "terrain_seed", "baseline", "baseline_rep", "moead_rep", "metric"],
     )
     paired_summary_by_scene = paired_summary_from_seed_rows(
         paired_by_seed,
-        ["variant", "size_tag", "baseline", "moead_rep", "metric"],
+        ["variant", "size_tag", "baseline", "baseline_rep", "moead_rep", "metric"],
     )
     paired_summary_all_scenes = paired_summary_from_seed_rows(
         paired_by_seed,
-        ["variant", "baseline", "moead_rep", "metric"],
+        ["variant", "baseline", "baseline_rep", "moead_rep", "metric"],
     )
 
     paths = {
@@ -914,6 +1190,22 @@ def main():
                     help="Exclude invalid_case rows from summary stats.")
     ap.add_argument("--no_paired", action="store_true",
                     help="Do not write paired relative improvement tables.")
+    ap.add_argument("--no_wilcoxon", action="store_true",
+                    help="Do not write Wilcoxon rank-sum significance table.")
+    ap.add_argument("--wilcoxon_baselines", type=str, default="PRM,NSGA-III-compromise",
+                    help="Comma-separated baseline method names for Wilcoxon rank-sum tests.")
+    ap.add_argument("--wilcoxon_methods", type=str, default="MOEAD_compromise",
+                    help="Comma-separated tested method names for Wilcoxon rank-sum tests; empty means all non-baseline methods.")
+    ap.add_argument("--wilcoxon_metrics", type=str, default="f1,f2,f3",
+                    help="Comma-separated metrics for Wilcoxon rank-sum tests.")
+    ap.add_argument("--wilcoxon_group_by", type=str, default="size_tag,variant",
+                    help="Comma-separated grouping columns for Wilcoxon rank-sum tests.")
+    ap.add_argument("--wilcoxon_alternative", choices=["two-sided", "less", "greater"], default="two-sided",
+                    help="Alternative hypothesis for Wilcoxon rank-sum tests.")
+    ap.add_argument("--wilcoxon_alpha", type=float, default=0.05,
+                    help="Significance level for Wilcoxon rank-sum tests.")
+    ap.add_argument("--wilcoxon_include_unfound", action="store_true",
+                    help="Include found=0 rows in Wilcoxon tests; default excludes them.")
 
     args = ap.parse_args()
 
@@ -988,6 +1280,25 @@ def main():
     if not args.no_paired:
         paired_paths = write_paired_outputs(wide_rows, out_dir, exclude_invalid=True)
 
+    wilcoxon_path = ""
+    wilcoxon_n = 0
+    if not args.no_wilcoxon:
+        from src.experiment.significance_test import write_wilcoxon_csv
+
+        wilcoxon_path = os.path.join(out_dir, "wilcoxon_rank_sum.csv")
+        wilcoxon_rows = write_wilcoxon_csv(
+            in_csv=out_long,
+            out_csv=wilcoxon_path,
+            baselines=parse_csv_list_arg(args.wilcoxon_baselines),
+            methods=parse_csv_list_arg(args.wilcoxon_methods),
+            metrics=parse_csv_list_arg(args.wilcoxon_metrics),
+            group_by=parse_csv_list_arg(args.wilcoxon_group_by),
+            alternative=args.wilcoxon_alternative,
+            alpha=float(args.wilcoxon_alpha),
+            include_unfound=bool(args.wilcoxon_include_unfound),
+        )
+        wilcoxon_n = len(wilcoxon_rows)
+
     print("[collect_results] done", flush=True)
     print("  metrics found     :", len(paths), flush=True)
     print("  parsed ok         :", len(wide_rows), flush=True)
@@ -998,6 +1309,8 @@ def main():
     print("  wrote             :", out_sum, flush=True)
     for _name, _path in paired_paths.items():
         print("  wrote             :", _path, flush=True)
+    if wilcoxon_path:
+        print("  wrote             :", wilcoxon_path, f"({wilcoxon_n} rows)", flush=True)
     print("  group_by          :", ",".join(group_keys), flush=True)
     if size_allow is not None:
         print("  filter size       :", size_allow, flush=True)

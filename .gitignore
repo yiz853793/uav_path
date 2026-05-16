@@ -80,6 +80,11 @@ wandb/
 runs/
 *debug*/
 
+# Local thesis/figure scratch work; keep these out of the engineering repo.
+diagram_viz/
+workspace_archive/
+paper_assets/
+
 # Large binary artifacts (optional)
 *.npz
 *.npy

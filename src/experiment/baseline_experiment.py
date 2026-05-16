@@ -6,9 +6,17 @@ VALUE_FLAGS = {
     '--seed_from', '--seed_to', '--num_terrains', '--glob',
     '--planner_seed', '--planner_seed_from', '--planner_seed_to', '--planner_seed_base', '--planner_seeds',
     '--repeat_count', '--progress_every', '--summary_log', '--summary_csv', '--single_case_out_dir',
-    '--rrt_iter', '--prm_samples', '--prm_k', '--prm_max_edge_len', '--prm_threat_weight',
+    '--rrt_iter', '--rrt_step_len', '--rrt_near_radius', '--rrt_goal_sample_rate', '--rrt_smooth_n_try', '--rrt_threat_weight',
+    '--improved_rrt_iter', '--improved_rrt_step_len', '--improved_rrt_near_radius',
+    '--improved_rrt_goal_sample_rate', '--improved_rrt_threat_weight',
+    '--prm_samples', '--prm_k', '--prm_max_edge_len', '--prm_threat_weight',
+    '--baseline_weight_count', '--baseline_threat_weight_min', '--baseline_threat_weight_max',
+    '--baseline_threat_weights', '--baseline_threat_weights_file', '--baseline_weights_file',
+    '--baseline_objective_weights_file', '--baseline_threat_scale', '--baseline_energy_climb_weight',
     '--moead_min_gen', '--moead_max_gen', '--mtoe_tol_fun', '--mtoe_confidence', '--mtoe_window',
     '--moead_pop', '--K', '--moead_T',
+    '--nsga3_max_gen', '--nsga3_pop', '--nsga3_ref_dirs', '--nsga3_crossover_prob',
+    '--nsga3_mutation_prob', '--nsga3_mutation_sigma',
     '--basin_shadow_enable', '--basin_band_count', '--basin_signature_samples', '--basin_stagnation_window',
     '--basin_f2_tol_abs', '--basin_f2_tol_rel', '--basin_ref_gap_tol', '--basin_min_distinct', '--basin_escape_injections',
     '--init_astar_ratio', '--init_astar_threat_weight', '--init_astar_jitter_sigma', '--init_astar_max_paths',
@@ -21,7 +29,7 @@ VALUE_FLAGS = {
     '--moead_eval_step', '--moead_smooth_step', '--start_goal_z_offset', '--moead_debug_csv', '--mtoe_csv',
     '--mtoe_debug_csv', '-o', '-t', '-d', '-s', '-n', '-P', '--gmax', '--pop', '--pseed', '--arch_soft'
 }
-BOOL_FLAGS = {'--disable_mtoe_stop', '--moead_debug'}
+BOOL_FLAGS = {'--disable_mtoe_stop', '--moead_debug', '--skip_improved_rrt', '--skip_nsga3', '--baseline_multi_weight', '--multi_weight_baselines'}
 CONFLICT_FLAGS = {
     '--disable_mtoe_stop', '--basin_shadow_enable', '--basin_escape_injections', '--init_astar_ratio',
     '--init_stratified_ratio', '--init_global_random_ratio', '--weight_extreme_bias', '--extreme_offspring_ratio',
@@ -120,7 +128,7 @@ def build_variants(suite: str, full_escape_injections: int) -> List[Dict[str, ob
     full = full_overlay(full_escape_injections)
     base = baseline_overlay()
     variants: List[Dict[str, object]] = [
-        {'name': 'baseline', 'group': 'main', 'desc': 'Plain MOEA/D baseline.', 'overlay': base},
+        {'name': 'baseline', 'group': 'main', 'desc': 'Plain MOEA/D plus shared NSGA-III baseline.', 'overlay': base},
         {'name': 'full', 'group': 'main', 'desc': 'Current full configuration.', 'overlay': full},
         {'name': 'wo_init', 'group': 'ablation_init', 'desc': 'Full without initialization enhancements.', 'overlay': merge_overlay(full, ['--init_astar_ratio', '0.0', '--init_stratified_ratio', '0.0', '--init_global_random_ratio', '1.0'])},
         {'name': 'wo_search', 'group': 'ablation_search', 'desc': 'Full without active sampling / local search / escape.', 'overlay': merge_overlay(full, ['--basin_shadow_enable', '0', '--basin_escape_injections', '0', '--weight_extreme_bias', '0.0', '--extreme_offspring_ratio', '0.0', '--local_search_interval', '0', '--local_search_elite_k', '0', '--local_search_attempts_per_obj', '0', '--active_subproblem_ratio', '1.0'])},
@@ -227,7 +235,7 @@ def run_variant_sweep(args, bench_args: List[str], variant_builder: VariantBuild
             repro_ns.moead_only = True
         print(f'[suite {idx}/{len(variants)}] variant={variant_name}')
         print('  out_root =', variant_root)
-        mode_desc = 'direct-call reproducibility -> moead only' if repro_ns.moead_only else 'direct-call reproducibility -> moead/rrt*/prm'
+        mode_desc = 'direct-call reproducibility -> moead only' if repro_ns.moead_only else 'direct-call reproducibility -> moead/nsga3/rrt*/improved-rrt*/prm'
         print('  mode =', mode_desc)
         variant_args = overlay_args(bench_args, list(variant['overlay']))
         if args.dry_run:

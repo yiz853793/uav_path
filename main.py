@@ -11,6 +11,7 @@ from src.env.grid_env import GridEnv
 from src.algorithms.rrt_star import rrt_star
 from src.algorithms.prm import prm
 from src.algorithms.moead import moead
+from src.algorithms.nsga3 import nsga3
 from src.viz.plot import plot_env
 from src.experiment.path_planning import write_mtoe_debug_log
 
@@ -138,6 +139,13 @@ def main():
     ap.add_argument("--moead_pop", type=int, default=60)
     ap.add_argument("--K", type=int, default=30)
     ap.add_argument("--moead_T", type=int, default=10)
+    ap.add_argument("--nsga3_max_gen", type=int, default=None)
+    ap.add_argument("--nsga3_pop", type=int, default=None)
+    ap.add_argument("--nsga3_ref_dirs", type=int, default=0)
+    ap.add_argument("--nsga3_crossover_prob", type=float, default=0.90)
+    ap.add_argument("--nsga3_mutation_prob", type=float, default=0.25)
+    ap.add_argument("--nsga3_mutation_sigma", type=float, default=2.5)
+    ap.add_argument("--skip_nsga3", action="store_true")
 
     # A* seeding（大图可增大 init_astar_max_expansions 以免 A* 未找到路径）
     ap.add_argument("--init_astar_ratio", type=float, default=0.25)
@@ -191,6 +199,12 @@ def main():
     args = ap.parse_args()
     if args.moead_max_gen is None:
         args.moead_max_gen = 80
+    if args.nsga3_max_gen is None:
+        args.nsga3_max_gen = args.moead_max_gen
+    if args.nsga3_pop is None:
+        args.nsga3_pop = args.moead_pop
+    if int(args.nsga3_ref_dirs) <= 0:
+        args.nsga3_ref_dirs = int(args.nsga3_pop)
 
     if args.terrain_type in ("city", "hill_city"):
         H, W = 1600, 2000
@@ -321,6 +335,45 @@ def main():
         debug_console=debug_console,
     )
 
+    nsga3_arch = None
+    nsga3_log = {"stop_reason": "skipped"}
+    if not args.skip_nsga3:
+        _, nsga3_arch, nsga3_log = nsga3(
+            env,
+            start,
+            goal,
+            n_gen=args.nsga3_max_gen,
+            pop=args.nsga3_pop,
+            K=args.K,
+            seed=args.planner_seed,
+            ref_dirs_count=args.nsga3_ref_dirs,
+            crossover_prob=args.nsga3_crossover_prob,
+            mutation_prob=args.nsga3_mutation_prob,
+            mutation_sigma=args.nsga3_mutation_sigma,
+            max_turn_deg=args.max_turn_deg,
+            soft_turn_deg=args.soft_turn_deg,
+            max_pitch_deg=args.max_pitch_deg,
+            soft_pitch_deg=args.soft_pitch_deg,
+            desired_clearance_margin=args.desired_clearance_margin,
+            tau_soft=args.tau_soft,
+            init_astar_ratio=args.init_astar_ratio,
+            init_astar_threat_weight=args.init_astar_threat_weight,
+            init_astar_jitter_sigma=args.init_astar_jitter_sigma,
+            init_astar_max_paths=args.init_astar_max_paths,
+            init_astar_penalty_step=args.init_astar_penalty_step,
+            init_astar_max_expansions=args.init_astar_max_expansions,
+            init_stratified_ratio=getattr(args, "init_stratified_ratio", 0.60),
+            init_stratified_lateral_frac=getattr(args, "init_stratified_lateral_frac", 0.30),
+            init_stratified_n_bands=getattr(args, "init_stratified_n_bands", 5),
+            init_stratified_progress_jitter=getattr(args, "init_stratified_progress_jitter", 0.08),
+            init_global_random_ratio=getattr(args, "init_global_random_ratio", 0.15),
+            weight_extreme_bias=getattr(args, "weight_extreme_bias", 0.20),
+            archive_size=getattr(args, "archive_size", 0),
+            archive_soft_limit=getattr(args, "archive_soft_limit", 320),
+            archive_grid_bins=getattr(args, "archive_grid_bins", 0),
+            archive_keep_extremes=bool(getattr(args, "archive_keep_extremes", 1)),
+        )
+
     # 保存 log（文件名带 A* 参数）；debug 细节单独放到 *_debug*.json
     metric_log, debug_log = split_moead_log(log)
     log_path = os.path.join(out_dir, f"log_seed{args.terrain_seed:04d}_pseed{args.planner_seed:04d}_{size_tag}{atag}.json")
@@ -371,6 +424,17 @@ def main():
                 "init_astar_max_paths": args.init_astar_max_paths,
                 "init_astar_penalty_step": args.init_astar_penalty_step,
             },
+            "nsga3": {
+                "n_gen": args.nsga3_max_gen,
+                "pop": args.nsga3_pop,
+                "K": args.K,
+                "ref_dirs": args.nsga3_ref_dirs,
+                "crossover_prob": args.nsga3_crossover_prob,
+                "mutation_prob": args.nsga3_mutation_prob,
+                "mutation_sigma": args.nsga3_mutation_sigma,
+                "stop_reason": nsga3_log.get("stop_reason") if isinstance(nsga3_log, dict) else None,
+                "archive_size": len(nsga3_arch.items) if nsga3_arch is not None else 0,
+            },
             "meta": meta,
             "log": metric_log,
             "archive_size": len(arch.items),
@@ -396,6 +460,14 @@ def main():
         print("archive size:", len(arch.items), flush=True)
         print("objs min:", objs.min(axis=0), flush=True)
         print("objs max:", objs.max(axis=0), flush=True)
+
+    nsga3_reps = None
+    if nsga3_arch is not None and len(nsga3_arch.items) > 0:
+        nsga3_reps = select_representatives(nsga3_arch.items, weights=(1.0, 1.0, 1.0))
+        nsga3_objs = nsga3_reps["objs"]
+        print("NSGA-III archive size:", len(nsga3_arch.items), flush=True)
+        print("NSGA-III objs min:", nsga3_objs.min(axis=0), flush=True)
+        print("NSGA-III objs max:", nsga3_objs.max(axis=0), flush=True)
 
     # -----------------------------
     # Figure 1: Paths
@@ -436,6 +508,17 @@ def main():
             path = arch.items[idx].x
             ax.plot(path[:, 0], path[:, 1], linewidth=2.0, label=label)
 
+    if nsga3_reps is not None and nsga3_arch is not None:
+        idx_map = {
+            "NSGA-III min f1": nsga3_reps["min_f1"],
+            "NSGA-III min f2": nsga3_reps["min_f2"],
+            "NSGA-III min f3": nsga3_reps["min_f3"],
+            "NSGA-III compromise": nsga3_reps["compromise"],
+        }
+        for label, idx in idx_map.items():
+            path = nsga3_arch.items[idx].x
+            ax.plot(path[:, 0], path[:, 1], linewidth=1.8, linestyle=":", label=label)
+
     ax.legend(loc="best", fontsize=9)
     ax.set_title(f"Paths | size={size_tag} seed={args.terrain_seed} pseed={args.planner_seed} (red=no-fly)")
     plt.tight_layout()
@@ -448,18 +531,23 @@ def main():
     # -----------------------------
     # Figure 2: Pareto 3D
     # -----------------------------
-    if reps is not None:
-        objs = reps["objs"]
+    if reps is not None or nsga3_reps is not None:
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
         fig2 = plt.figure(figsize=(8, 6))
         ax2 = fig2.add_subplot(111, projection="3d")
-        ax2.scatter(objs[:, 0], objs[:, 1], objs[:, 2], s=12)
+        if reps is not None:
+            objs = reps["objs"]
+            ax2.scatter(objs[:, 0], objs[:, 1], objs[:, 2], s=12, label="MOEA/D")
+        if nsga3_reps is not None:
+            nsga3_objs = nsga3_reps["objs"]
+            ax2.scatter(nsga3_objs[:, 0], nsga3_objs[:, 1], nsga3_objs[:, 2], s=12, marker="^", label="NSGA-III")
 
         ax2.set_xlabel("f1: length")
         ax2.set_ylabel("f2: threat")
         ax2.set_zlabel("f3: energy")
         ax2.set_title(f"Pareto 3D | size={size_tag} seed={args.terrain_seed} pseed={args.planner_seed}")
+        ax2.legend(loc="best")
 
         plt.tight_layout()
         pareto_png = os.path.join(out_dir, f"pareto3d_seed{args.terrain_seed:04d}_pseed{args.planner_seed:04d}_{size_tag}_inf{args.inflate}_K{args.K}{atag}.png")

@@ -301,6 +301,9 @@ def _edge_feasible_and_cost_3d(
     threat_weight: float,
     collision_step: float,
     clearance_margin: float,
+    length_weight: float = 1.0,
+    energy_weight: float = 0.0,
+    energy_climb_weight: float = 2.0,
 ) -> tuple[bool, float]:
     pts = sampled_points_array(np.asarray(p0, dtype=np.float32), np.asarray(p1, dtype=np.float32), step=collision_step, xy_resolution=env.resolution)
     ix = np.rint(pts[:, 0]).astype(np.int32, copy=False)
@@ -318,10 +321,15 @@ def _edge_feasible_and_cost_3d(
     dxyz[0] *= float(env.resolution)
     dxyz[1] *= float(env.resolution)
     base = float(np.linalg.norm(dxyz))
+    cost = float(length_weight) * float(base)
+    if float(energy_weight) != 0.0:
+        climb = max(0.0, float(p1[2]) - float(p0[2]))
+        edge_energy = float(base) + float(energy_climb_weight) * float(climb)
+        cost += float(energy_weight) * edge_energy
     if float(threat_weight) == 0.0:
-        return True, base
+        return True, float(cost)
     threat_cost = float(env.threat[iy, ix].mean(dtype=np.float64))
-    return True, float(base + float(threat_weight) * threat_cost)
+    return True, float(cost + float(threat_weight) * threat_cost)
 
 
 def _build_roadmap_3d(
@@ -332,6 +340,9 @@ def _build_roadmap_3d(
     collision_step: float,
     threat_weight: float,
     clearance_margin: float,
+    length_weight: float = 1.0,
+    energy_weight: float = 0.0,
+    energy_climb_weight: float = 2.0,
 ) -> PRMGraph:
     n = int(points_xyz.shape[0])
     adj: list[list[tuple[int, float]]] = [[] for _ in range(n)]
@@ -384,6 +395,9 @@ def _build_roadmap_3d(
                 threat_weight=threat_weight,
                 collision_step=collision_step,
                 clearance_margin=clearance_margin,
+                length_weight=length_weight,
+                energy_weight=energy_weight,
+                energy_climb_weight=energy_climb_weight,
             )
             if not ok:
                 collision_rejects += 1
@@ -443,6 +457,9 @@ def prm(
     max_edge_len: float = 28.0,
     collision_step: float = 0.5,
     threat_weight: float = 0.0,
+    length_weight: float = 1.0,
+    energy_weight: float = 0.0,
+    energy_climb_weight: float = 2.0,
     sample_clearance: int = 0,  # 兼容旧接口，当前 3D PRM 不使用该参数
     smooth: bool = True,
     smooth_n_try: int = 80,
@@ -503,6 +520,9 @@ def prm(
             collision_step=float(collision_step),
             threat_weight=float(threat_weight),
             clearance_margin=float(clearance_margin),
+            length_weight=float(length_weight),
+            energy_weight=float(energy_weight),
+            energy_climb_weight=float(energy_climb_weight),
         )
         graph.stats.update({
             "attempt_id": int(attempt_id),

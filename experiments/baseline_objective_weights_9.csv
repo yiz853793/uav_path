@@ -1,0 +1,11 @@
+# Compact objective weights for multi-weight RRT*/PRM baselines: w1,w2,w3.
+# w1 maps to path length, w2 maps to threat after --baseline_threat_scale, w3 maps to approximate edge energy.
+1,0,0
+0,1,0
+0,0,1
+0.5,0.5,0
+0.5,0,0.5
+0,0.5,0.5
+0.6,0.2,0.2
+0.2,0.6,0.2
+0.2,0.2,0.6

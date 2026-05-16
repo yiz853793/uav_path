@@ -47,6 +47,21 @@ def _repr_item_from_arch_item(arch_item) -> Dict[str, Any]:
     }
 
 
+def _repr_item_from_baseline_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    obj = item.get("obj") if isinstance(item, dict) else None
+    detail = item.get("detail") if isinstance(item, dict) else None
+    out: Dict[str, Any] = {
+        "path": _path_to_list(item.get("path") if isinstance(item, dict) else None),
+        "f": [float(v) for v in (obj or [])[:3]],
+        "feasible": bool(item.get("feasible", False)) if isinstance(item, dict) else False,
+        "violation": item.get("violation") if isinstance(item, dict) else None,
+        "runtime_ms": item.get("runtime_ms") if isinstance(item, dict) else None,
+    }
+    if isinstance(detail, dict):
+        out["detail"] = {k: float(v) for k, v in detail.items()}
+    return out
+
+
 def build_vis_payload(
     terrain_file: str,
     terrain_seed: Optional[int],
@@ -57,7 +72,12 @@ def build_vis_payload(
     start,
     goal,
     path_rrt=None,
+    path_improved_rrt=None,
     path_prm=None,
+    rrt_reps: Optional[Dict[str, Any]] = None,
+    prm_reps: Optional[Dict[str, Any]] = None,
+    rrt_archive_stats: Optional[Dict[str, Any]] = None,
+    prm_archive_stats: Optional[Dict[str, Any]] = None,
     arch=None,
     reps=None,
     title: str = "",
@@ -77,12 +97,39 @@ def build_vis_payload(
         "planners": {
             "rrt": {
                 "path": _path_to_list(path_rrt),
+                "archive_stats": dict(rrt_archive_stats or {}),
+                "representatives": {
+                    key: _repr_item_from_baseline_item(item)
+                    for key, item in (rrt_reps or {}).items()
+                    if key in {"min_f1", "min_f2", "min_f3", "compromise"}
+                },
+            },
+            "improved_rrt": {
+                "path": _path_to_list(path_improved_rrt),
             },
             "prm": {
                 "path": _path_to_list(path_prm),
+                "archive_stats": dict(prm_archive_stats or {}),
+                "representatives": {
+                    key: _repr_item_from_baseline_item(item)
+                    for key, item in (prm_reps or {}).items()
+                    if key in {"min_f1", "min_f2", "min_f3", "compromise"}
+                },
             },
         },
     }
+    if payload["planners"]["rrt"]["archive_stats"]:
+        payload["planners"]["rrt"]["archive_stats"]["representative_unique_count"] = len({
+            tuple(round(float(v), 6) for v in item.get("obj", [])[:3])
+            for item in (rrt_reps or {}).values()
+            if isinstance(item, dict) and isinstance(item.get("obj"), (list, tuple)) and len(item.get("obj")) >= 3
+        })
+    if payload["planners"]["prm"]["archive_stats"]:
+        payload["planners"]["prm"]["archive_stats"]["representative_unique_count"] = len({
+            tuple(round(float(v), 6) for v in item.get("obj", [])[:3])
+            for item in (prm_reps or {}).values()
+            if isinstance(item, dict) and isinstance(item.get("obj"), (list, tuple)) and len(item.get("obj")) >= 3
+        })
 
     # 涓嶅啀淇濆瓨 archive 鏄庣粏锛屽彧淇濈暀 3 鐩爣鐐?
     archive_points = []
@@ -263,14 +310,27 @@ def extract_paths(vis: Dict[str, Any]) -> Dict[str, np.ndarray]:
 
     planners = vis.get("planners", None)
     if isinstance(planners, dict):
-        for key in ["rrt", "prm"]:
+        for key in ["rrt", "improved_rrt", "prm"]:
             item = planners.get(key, None)
             if isinstance(item, dict):
+                planner_reps = item.get("representatives", None)
+                has_reps = isinstance(planner_reps, dict) and len(planner_reps) > 0
                 path = item.get("path", None)
-                if path is not None:
+                if path is not None and not has_reps:
                     arr = np.asarray(path, dtype=float)
                     if arr.ndim == 2 and arr.shape[1] >= 2:
                         out[key] = arr
+                if isinstance(planner_reps, dict):
+                    for rep_key in ["min_f1", "min_f2", "min_f3", "compromise"]:
+                        rep_item = planner_reps.get(rep_key, None)
+                        if not isinstance(rep_item, dict):
+                            continue
+                        rep_path = rep_item.get("path", None)
+                        if rep_path is None:
+                            continue
+                        arr = np.asarray(rep_path, dtype=float)
+                        if arr.ndim == 2 and arr.shape[1] >= 2:
+                            out[f"{key}_{rep_key}"] = arr
 
     representatives = vis.get("representatives", None)
     if isinstance(representatives, dict):
@@ -338,8 +398,17 @@ def representative_color(key: str) -> str:
 
 
 PATH_STYLE = {
-    "rrt": dict(label="RRT", linewidth=2.6, alpha=0.95),
+    "rrt": dict(label="RRT*", linewidth=2.6, alpha=0.95),
+    "improved_rrt": dict(label="Improved RRT*", linewidth=2.8, alpha=0.95, linestyle="-."),
     "prm": dict(label="PRM", linewidth=2.6, alpha=0.95),
+    "rrt_min_f1": dict(label="RRT* min_f1", linewidth=2.4, alpha=0.95),
+    "rrt_min_f2": dict(label="RRT* min_f2", linewidth=2.2, alpha=0.88, linestyle="--"),
+    "rrt_min_f3": dict(label="RRT* min_f3", linewidth=2.2, alpha=0.88, linestyle=":"),
+    "rrt_compromise": dict(label="RRT* compromise", linewidth=2.7, alpha=0.95, linestyle="-."),
+    "prm_min_f1": dict(label="PRM min_f1", linewidth=2.4, alpha=0.95),
+    "prm_min_f2": dict(label="PRM min_f2", linewidth=2.2, alpha=0.88, linestyle="--"),
+    "prm_min_f3": dict(label="PRM min_f3", linewidth=2.2, alpha=0.88, linestyle=":"),
+    "prm_compromise": dict(label="PRM compromise", linewidth=2.7, alpha=0.95, linestyle="-."),
     "min_f1": dict(label="MOEA/D min_f1", linewidth=2.1, alpha=0.92),
     "min_f2": dict(label="MOEA/D min_f2", linewidth=2.1, alpha=0.92),
     "min_f3": dict(label="MOEA/D min_f3", linewidth=2.1, alpha=0.92),

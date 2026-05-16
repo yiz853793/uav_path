@@ -139,6 +139,8 @@ RUN_PROFILES = {
     'quick': {
         'inflate': 1.0,
         'rrt_iter': 4000,
+        'rrt_threat_weight': 0.0,
+        'improved_rrt_iter': 0,
         'prm_samples': 4000,
         'prm_k': 24,
         'prm_max_edge_len': 120.0,
@@ -147,6 +149,9 @@ RUN_PROFILES = {
         'moead_max_gen': 300,
         'moead_pop': 80,
         'moead_T': 10,
+        'nsga3_max_gen': 300,
+        'nsga3_pop': 80,
+        'nsga3_ref_dirs': 0,
         'active_subproblem_ratio': 0.75,
         'archive_size': 0,
         'archive_soft_limit': 240,
@@ -156,6 +161,8 @@ RUN_PROFILES = {
     'balanced': {
         'inflate': 1.0,
         'rrt_iter': 6000,
+        'rrt_threat_weight': 0.0,
+        'improved_rrt_iter': 0,
         'prm_samples': 12000,
         'prm_k': 48,
         'prm_max_edge_len': 250.0,
@@ -164,6 +171,9 @@ RUN_PROFILES = {
         'moead_max_gen': 700,
         'moead_pop': 128,
         'moead_T': 14,
+        'nsga3_max_gen': 700,
+        'nsga3_pop': 128,
+        'nsga3_ref_dirs': 0,
         'active_subproblem_ratio': 0.80,
         'archive_size': 0,
         'archive_soft_limit': 320,
@@ -173,6 +183,8 @@ RUN_PROFILES = {
     'quality': {
         'inflate': 1.0,
         'rrt_iter': 8000,
+        'rrt_threat_weight': 0.0,
+        'improved_rrt_iter': 0,
         'prm_samples': 16000,
         'prm_k': 64,
         'prm_max_edge_len': 280.0,
@@ -181,6 +193,9 @@ RUN_PROFILES = {
         'moead_max_gen': 1600,
         'moead_pop': 160,
         'moead_T': 16,
+        'nsga3_max_gen': 1600,
+        'nsga3_pop': 160,
+        'nsga3_ref_dirs': 0,
         'active_subproblem_ratio': 0.90,
         'archive_size': 0,
         'archive_soft_limit': 400,
@@ -192,6 +207,8 @@ RUN_PROFILES = {
 PROFILE_OPTION_NAMES = {
     'inflate': ('--inflate', '-i'),
     'rrt_iter': ('--rrt_iter', '--rrt'),
+    'rrt_threat_weight': ('--rrt_threat_weight',),
+    'improved_rrt_iter': ('--improved_rrt_iter', '--irrt_iter'),
     'prm_samples': ('--prm_samples', '--prm_n'),
     'prm_k': ('--prm_k',),
     'prm_max_edge_len': ('--prm_max_edge_len', '--prm_edge'),
@@ -200,6 +217,9 @@ PROFILE_OPTION_NAMES = {
     'moead_max_gen': ('--moead_max_gen', '--gmax'),
     'moead_pop': ('--moead_pop', '--pop'),
     'moead_T': ('--moead_T', '-T'),
+    'nsga3_max_gen': ('--nsga3_max_gen',),
+    'nsga3_pop': ('--nsga3_pop',),
+    'nsga3_ref_dirs': ('--nsga3_ref_dirs',),
     'active_subproblem_ratio': ('--active_subproblem_ratio', '--active_ratio'),
     'archive_size': ('--archive_size',),
     'archive_soft_limit': ('--archive_soft_limit', '--arch_soft'),
@@ -518,6 +538,32 @@ def build_moead_metrics_block(args, log, runtime_ms: float, archive_size: int):
     return block, debug_log
 
 
+def build_nsga3_metrics_block(args, log, runtime_ms: float, archive_size: int):
+    metric_log = log if isinstance(log, dict) else {}
+    stop_reason = metric_log.get('stop_reason')
+    if stop_reason is None:
+        stop_reason = 'not_run' if not metric_log and float(runtime_ms) <= 0.0 else None
+    block = {
+        'n_gen': int(metric_log.get('n_gen', getattr(args, 'nsga3_max_gen', 0))),
+        'configured_n_gen': int(metric_log.get('configured_n_gen', getattr(args, 'nsga3_max_gen', 0))),
+        'requested_n_gen': int(metric_log.get('requested_n_gen', getattr(args, 'nsga3_max_gen', 0))),
+        'pop': int(getattr(args, 'nsga3_pop', getattr(args, 'moead_pop', 0))),
+        'K': int(args.K),
+        'ref_dirs': int(metric_log.get('ref_dirs', getattr(args, 'nsga3_ref_dirs', 0))),
+        'crossover_prob': float(getattr(args, 'nsga3_crossover_prob', 0.90)),
+        'mutation_prob': float(getattr(args, 'nsga3_mutation_prob', 0.25)),
+        'mutation_sigma': float(getattr(args, 'nsga3_mutation_sigma', 2.5)),
+        'runtime_ms': float(runtime_ms),
+        'archive_size': int(archive_size),
+        'stop_reason': stop_reason,
+        'front0_size': metric_log.get('front0_size'),
+        'feasible_count': metric_log.get('feasible_count'),
+        'n_eval': metric_log.get('n_eval'),
+        'init_profile': metric_log.get('init_profile'),
+    }
+    return block
+
+
 # ===== Benchmark argument parser =====
 import argparse
 from typing import List
@@ -549,10 +595,29 @@ def build_benchmark_parser() -> argparse.ArgumentParser:
     ap.add_argument("--inflate", "-i", type=float, default=1.0, help="inflate obstacle radius in meters")
 
     ap.add_argument("--rrt_iter", "--rrt", dest="rrt_iter", type=int, default=4000, help="RRT* iterations")
+    ap.add_argument("--rrt_step_len", type=float, default=6.0, help="RRT* base step length in cells")
+    ap.add_argument("--rrt_near_radius", type=float, default=12.0, help="RRT* rewiring radius in cells")
+    ap.add_argument("--rrt_goal_sample_rate", type=float, default=0.05, help="RRT* goal sampling probability")
+    ap.add_argument("--rrt_smooth_n_try", type=int, default=80, help="RRT* shortcut smoothing attempts")
+    ap.add_argument("--rrt_threat_weight", type=float, default=0.0, help="RRT* threat-aware edge-cost weight")
+    ap.add_argument("--improved_rrt_iter", "--irrt_iter", dest="improved_rrt_iter", type=int, default=0, help="Improved RRT* iterations; <=0 reuses --rrt_iter")
+    ap.add_argument("--improved_rrt_step_len", "--irrt_step", dest="improved_rrt_step_len", type=float, default=8.0, help="Improved RRT* base step length in cells")
+    ap.add_argument("--improved_rrt_near_radius", "--irrt_near", dest="improved_rrt_near_radius", type=float, default=16.0, help="Improved RRT* rewiring radius in cells")
+    ap.add_argument("--improved_rrt_goal_sample_rate", "--irrt_goal_rate", dest="improved_rrt_goal_sample_rate", type=float, default=0.08, help="Improved RRT* goal sampling probability")
+    ap.add_argument("--improved_rrt_threat_weight", "--irrt_threat_weight", dest="improved_rrt_threat_weight", type=float, default=0.0, help="Improved RRT* threat-aware edge-cost weight")
+    ap.add_argument("--skip_improved_rrt", action="store_true", help="skip the Improved RRT* baseline")
     ap.add_argument("--prm_samples", "--prm_n", dest="prm_samples", type=int, default=1200, help="PRM sample count")
     ap.add_argument("--prm_k", type=int, default=12, help="PRM neighbors per node")
     ap.add_argument("--prm_max_edge_len", "--prm_edge", dest="prm_max_edge_len", type=float, default=30.0, help="PRM max edge length in meters")
     ap.add_argument("--prm_threat_weight", type=float, default=0.0, help="PRM threat weight")
+    ap.add_argument("--baseline_multi_weight", "--multi_weight_baselines", action="store_true", help="run RRT*/PRM over a sweep of objective weights and keep objective-wise representatives")
+    ap.add_argument("--baseline_weight_count", type=int, default=21, help="number of objective weights for multi-weight RRT*/PRM baselines")
+    ap.add_argument("--baseline_threat_weight_min", type=float, default=0.0, help="minimum legacy threat weight in the multi-weight baseline sweep")
+    ap.add_argument("--baseline_threat_weight_max", type=float, default=100.0, help="maximum legacy threat weight in the multi-weight baseline sweep")
+    ap.add_argument("--baseline_threat_weights", type=str, default="", help="optional comma-separated threat weights overriding the generated sweep")
+    ap.add_argument("--baseline_weights_file", "--baseline_objective_weights_file", "--baseline_threat_weights_file", dest="baseline_threat_weights_file", type=str, default="", help="optional JSON/TXT/CSV file containing objective weight triples or legacy threat weights")
+    ap.add_argument("--baseline_threat_scale", type=float, default=25.0, help="scale applied to the f2 component when objective triples are converted to RRT*/PRM edge cost")
+    ap.add_argument("--baseline_energy_climb_weight", type=float, default=2.0, help="climb penalty multiplier for the approximate f3 edge-energy term used by weighted RRT*/PRM")
 
     ap.add_argument("--moead_min_gen", "--gmin", dest="moead_min_gen", type=int, default=20, help="minimum MOEA/D generations before early stop")
     ap.add_argument("--moead_max_gen", "--gmax", dest="moead_max_gen", type=int, default=None, help="maximum MOEA/D generations")
@@ -573,6 +638,13 @@ def build_benchmark_parser() -> argparse.ArgumentParser:
     ap.add_argument("--K", type=int, default=30, help="number of control points per path")
 
     ap.add_argument("--moead_T", "-T", dest="moead_T", type=int, default=10, help="MOEA/D neighborhood size T")
+    ap.add_argument("--nsga3_max_gen", type=int, default=None, help="maximum NSGA-III generations; defaults to --moead_max_gen/profile")
+    ap.add_argument("--nsga3_pop", type=int, default=None, help="NSGA-III population size; defaults to --moead_pop/profile")
+    ap.add_argument("--nsga3_ref_dirs", type=int, default=0, help="NSGA-III reference direction count; <=0 reuses --nsga3_pop")
+    ap.add_argument("--nsga3_crossover_prob", type=float, default=0.90, help="NSGA-III crossover probability")
+    ap.add_argument("--nsga3_mutation_prob", type=float, default=0.25, help="NSGA-III per-waypoint mutation probability")
+    ap.add_argument("--nsga3_mutation_sigma", type=float, default=2.5, help="NSGA-III mutation sigma in grid cells")
+    ap.add_argument("--skip_nsga3", action="store_true", help="skip the NSGA-III baseline")
     ap.add_argument("--init_astar_ratio", type=float, default=0.25, help="fraction of population initialized from A* seeding")
     ap.add_argument("--init_astar_threat_weight", type=float, default=0.0, help="A* cost threat weight for seeding (0=ignore threat)")
     ap.add_argument("--init_astar_jitter_sigma", type=float, default=1.5, help="std of Gaussian jitter for A* path points")
@@ -633,6 +705,12 @@ def parse_benchmark_args(argv: List[str]):
     apply_run_profile(args, argv)
     if args.moead_max_gen is None:
         args.moead_max_gen = 80
+    if getattr(args, 'nsga3_max_gen', None) is None:
+        args.nsga3_max_gen = int(args.moead_max_gen)
+    if getattr(args, 'nsga3_pop', None) is None:
+        args.nsga3_pop = int(args.moead_pop)
+    if int(getattr(args, 'nsga3_ref_dirs', 0)) <= 0:
+        args.nsga3_ref_dirs = int(args.nsga3_pop)
     if args.num_terrains is not None and not args.glob.strip():
         args.seed_to = int(args.seed_from) + int(max(0, args.num_terrains))
     if args.outdir is not None and str(args.outdir).strip():
@@ -651,13 +729,454 @@ import numpy as np
 
 from src.env.grid_env import GridEnv
 from src.algorithms.rrt_star import rrt_star
+from src.algorithms.improved_rrt_star import improved_rrt_star
 from src.algorithms.prm import prm
 from src.algorithms.moead import moead
+from src.algorithms.nsga3 import nsga3
 from src.models.evaluator import evaluate_path
 from src.experiment.terrain_result_plotting import build_vis_payload, save_vis_payload
 
 def meters_to_cells(env, value_m: float) -> float:
     return float(value_m) / float(env.resolution)
+
+
+def select_archive_representatives(arch):
+    if arch is None or len(getattr(arch, 'items', [])) <= 0:
+        return None
+    objs = np.array([it.er.obj for it in arch.items], dtype=float)
+    idx_f1 = int(np.argmin(objs[:, 0]))
+    idx_f2 = int(np.argmin(objs[:, 1]))
+    idx_f3 = int(np.argmin(objs[:, 2]))
+    mn = objs.min(axis=0)
+    mx = objs.max(axis=0)
+    denom = np.where((mx - mn) > 1e-12, (mx - mn), 1.0)
+    score = ((objs - mn) / denom) @ (np.array([1.0, 1.0, 1.0]) / 3.0)
+    return {
+        'min_f1': idx_f1,
+        'min_f2': idx_f2,
+        'min_f3': idx_f3,
+        'compromise': int(np.argmin(score)),
+        'objs': objs,
+    }
+
+
+def representative_objectives(arch, reps):
+    if arch is None or reps is None:
+        return None
+
+    def obj_of(name):
+        idx = int(reps[name])
+        return [float(x) for x in arch.items[idx].er.obj]
+
+    return {
+        'min_f1': obj_of('min_f1'),
+        'min_f2': obj_of('min_f2'),
+        'min_f3': obj_of('min_f3'),
+        'compromise': obj_of('compromise'),
+    }
+
+
+def _finite_obj3(obj) -> bool:
+    if not isinstance(obj, (list, tuple)) or len(obj) < 3:
+        return False
+    return all(np.isfinite(float(v)) for v in obj[:3])
+
+
+def _parse_float_list(text: str) -> List[float]:
+    values: List[float] = []
+    normalized = str(text or "").replace("[", " ").replace("]", " ").replace(";", " ").replace(",", " ")
+    for line in normalized.splitlines():
+        line = line.split("#", 1)[0]
+        line = line.split("//", 1)[0]
+        for part in line.split():
+            s = part.strip().lstrip("\ufeff")
+            if not s:
+                continue
+            values.append(float(s))
+    return values
+
+
+def _normalize_objective_weight(vals: List[float]) -> List[float]:
+    if len(vals) != 3:
+        raise ValueError("objective weight must have three values")
+    arr = np.asarray(vals, dtype=np.float64)
+    arr = np.clip(arr, 0.0, None)
+    s = float(np.sum(arr))
+    if s <= 0.0:
+        raise ValueError("objective weight sum must be positive")
+    return [float(v) for v in (arr / s)]
+
+
+def _weight_spec_from_lambda(value: float) -> Dict[str, Any]:
+    v = float(max(0.0, value))
+    return {
+        "kind": "lambda",
+        "weight": None,
+        "length_weight": 1.0,
+        "threat_weight": v,
+        "energy_weight": 0.0,
+        "label": f"lambda={v:g}",
+    }
+
+
+def _weight_spec_from_tuple(vals: List[float], args) -> Dict[str, Any]:
+    w1, w2, w3 = _normalize_objective_weight(vals)
+    threat_scale = float(getattr(args, "baseline_threat_scale", 25.0))
+    return {
+        "kind": "tuple",
+        "weight": [w1, w2, w3],
+        "length_weight": float(w1),
+        "threat_weight": float(w2) * threat_scale,
+        "energy_weight": float(w3),
+        "label": f"w=({w1:g},{w2:g},{w3:g})",
+    }
+
+
+def _weight_spec_from_json_item(item: Any, args) -> Dict[str, Any]:
+    if isinstance(item, dict):
+        if "lambda" in item:
+            return _weight_spec_from_lambda(float(item["lambda"]))
+        if "threat_weight" in item and not any(k in item for k in ("w1", "w2", "w3", "weight", "weights")):
+            return _weight_spec_from_lambda(float(item["threat_weight"]))
+        if isinstance(item.get("weight"), list):
+            return _weight_spec_from_tuple([float(v) for v in item["weight"][:3]], args)
+        if isinstance(item.get("weights"), list):
+            return _weight_spec_from_tuple([float(v) for v in item["weights"][:3]], args)
+        keys = ("w1", "w2", "w3") if "w1" in item else ("f1", "f2", "f3")
+        if all(k in item for k in keys):
+            return _weight_spec_from_tuple([float(item[k]) for k in keys], args)
+    if isinstance(item, (list, tuple)):
+        if len(item) == 1:
+            return _weight_spec_from_lambda(float(item[0]))
+        if len(item) >= 3:
+            return _weight_spec_from_tuple([float(item[0]), float(item[1]), float(item[2])], args)
+    return _weight_spec_from_lambda(float(item))
+
+
+def _parse_weight_specs_text(text: str, args) -> List[Dict[str, Any]]:
+    specs: List[Dict[str, Any]] = []
+    for raw_line in str(text or "").replace("[", " ").replace("]", " ").splitlines():
+        line = raw_line.split("#", 1)[0].split("//", 1)[0].strip().lstrip("\ufeff")
+        if not line:
+            continue
+        parts = [p for p in line.replace(";", " ").replace(",", " ").split() if p]
+        try:
+            vals = [float(p) for p in parts]
+        except ValueError:
+            continue
+        if len(vals) == 3:
+            specs.append(_weight_spec_from_tuple(vals, args))
+        else:
+            specs.extend(_weight_spec_from_lambda(v) for v in vals)
+    return specs
+
+
+def _read_weight_specs_file(path: str, args) -> List[Dict[str, Any]]:
+    file_path = str(path or "").strip()
+    if not file_path:
+        return []
+    with open(file_path, "r", encoding="utf-8") as f:
+        text = f.read().lstrip("\ufeff")
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("weights", "objective_weights", "baseline_objective_weights", "threat_weights", "baseline_threat_weights"):
+            if isinstance(payload.get(key), list):
+                return [_weight_spec_from_json_item(v, args) for v in payload[key]]
+    if isinstance(payload, list):
+        return [_weight_spec_from_json_item(v, args) for v in payload]
+    return _parse_weight_specs_text(text, args)
+
+
+def _generate_objective_weight_specs(args) -> List[Dict[str, Any]]:
+    n = max(1, int(getattr(args, "baseline_weight_count", 21)))
+    level = 1
+    while ((level + 1) * (level + 2)) // 2 < n:
+        level += 1
+    triples: List[List[float]] = []
+    for i in range(level + 1):
+        for j in range(level + 1 - i):
+            k = level - i - j
+            triples.append([i / level, j / level, k / level])
+    triples = sorted(triples, key=lambda w: (max(w) < 0.999, -max(w), w[0], w[1], w[2]))
+    if len(triples) > n:
+        idx = np.linspace(0, len(triples) - 1, n).round().astype(int)
+        triples = [triples[int(i)] for i in idx]
+    return [_weight_spec_from_tuple(w, args) for w in triples]
+
+
+def baseline_weight_sweep(args, default_weight: float) -> List[Dict[str, Any]]:
+    if str(getattr(args, "baseline_threat_weights", "")).strip():
+        raw = [_weight_spec_from_lambda(v) for v in _parse_float_list(getattr(args, "baseline_threat_weights", ""))]
+    elif str(getattr(args, "baseline_threat_weights_file", "")).strip():
+        raw = _read_weight_specs_file(getattr(args, "baseline_threat_weights_file", ""), args)
+    elif bool(getattr(args, "baseline_multi_weight", False)):
+        raw = _generate_objective_weight_specs(args)
+    else:
+        raw = [_weight_spec_from_lambda(float(default_weight))]
+
+    out: List[Dict[str, Any]] = []
+    seen: set[tuple[float, float, float]] = set()
+    for spec in raw:
+        if not isinstance(spec, dict):
+            continue
+        key = (
+            round(float(spec.get("length_weight", 0.0)), 12),
+            round(float(spec.get("threat_weight", 0.0)), 12),
+            round(float(spec.get("energy_weight", 0.0)), 12),
+        )
+        if key not in seen:
+            seen.add(key)
+            out.append(spec)
+    return out or [_weight_spec_from_lambda(float(default_weight))]
+
+
+def baseline_weight_source(args) -> str:
+    if str(getattr(args, "baseline_threat_weights", "")).strip():
+        return "cli"
+    if str(getattr(args, "baseline_threat_weights_file", "")).strip():
+        return str(getattr(args, "baseline_threat_weights_file", "")).strip()
+    if bool(getattr(args, "baseline_multi_weight", False)):
+        return "generated"
+    return "single"
+
+
+def _weight_spec_summary(spec: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(spec, dict):
+        return None
+    weight = spec.get("weight")
+    if isinstance(weight, (list, tuple)) and len(weight) >= 3:
+        weight_out = [float(weight[0]), float(weight[1]), float(weight[2])]
+    else:
+        weight_out = None
+    return {
+        "kind": str(spec.get("kind", "")),
+        "weight": weight_out,
+        "length_weight": float(spec.get("length_weight", 1.0)),
+        "threat_weight": float(spec.get("threat_weight", 0.0)),
+        "energy_weight": float(spec.get("energy_weight", 0.0)),
+        "label": str(spec.get("label", "")),
+    }
+
+
+def _candidate_summary(candidate: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+    return {
+        "found": bool(candidate.get("found", False)),
+        "path_len": candidate.get("path_len"),
+        "obj": candidate.get("obj"),
+        "feasible": bool(candidate.get("feasible", False)),
+        "violation": candidate.get("violation"),
+    }
+
+
+def _baseline_representatives(candidates: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    valid = [
+        c for c in candidates
+        if bool(c.get("found", False)) and _finite_obj3(c.get("obj"))
+    ]
+    reps: Dict[str, Dict[str, Any]] = {}
+    for obj_idx, name in enumerate(("min_f1", "min_f2", "min_f3")):
+        if not valid:
+            break
+        best = min(valid, key=lambda c: (float(c["obj"][obj_idx]), int(c.get("index", 0))))
+        reps[name] = best
+    if valid:
+        objs = np.asarray([c["obj"][:3] for c in valid], dtype=np.float64)
+        mn = objs.min(axis=0)
+        mx = objs.max(axis=0)
+        denom = np.where((mx - mn) > 1e-12, (mx - mn), 1.0)
+        score = ((objs - mn) / denom) @ (np.array([1.0, 1.0, 1.0], dtype=np.float64) / 3.0)
+        idx = int(np.argmin(score))
+        reps["compromise"] = valid[idx]
+    return reps
+
+
+def _baseline_rep_objectives(reps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for name in ("min_f1", "min_f2", "min_f3", "compromise"):
+        item = _candidate_summary(reps.get(name))
+        if item is not None:
+            out[name] = item
+    return out
+
+
+def _baseline_rep_paths(reps: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for name in ("min_f1", "min_f2", "min_f3", "compromise"):
+        item = reps.get(name)
+        if isinstance(item, dict) and item.get("path") is not None:
+            out[name] = item
+    return out
+
+
+def _baseline_archive_stats(candidates: List[Dict[str, Any]]) -> Dict[str, int]:
+    valid = [
+        c for c in candidates
+        if bool(c.get("found", False)) and _finite_obj3(c.get("obj"))
+    ]
+    feasible = [c for c in valid if bool(c.get("feasible", False))]
+    unique = {
+        tuple(round(float(v), 6) for v in c.get("obj", [])[:3])
+        for c in valid
+    }
+    return {
+        "candidate_count": int(len(candidates)),
+        "archive_size": int(len(valid)),
+        "feasible_archive_size": int(len(feasible)),
+        "unique_archive_size": int(len(unique)),
+    }
+
+
+def _baseline_representative_unique_count(reps: Dict[str, Dict[str, Any]]) -> int:
+    unique = set()
+    for name in ("min_f1", "min_f2", "min_f3", "compromise"):
+        item = reps.get(name)
+        obj = item.get("obj") if isinstance(item, dict) else None
+        if _finite_obj3(obj):
+            unique.add(tuple(round(float(v), 6) for v in obj[:3]))
+    return int(len(unique))
+
+
+def _pick_baseline_legacy(reps: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return reps.get("min_f1") or reps.get("min_f2") or reps.get("min_f3")
+
+
+def _build_baseline_metrics_block(
+    *,
+    skipped: bool,
+    total_runtime_ms: float,
+    candidates: List[Dict[str, Any]],
+    reps: Dict[str, Dict[str, Any]],
+    legacy: Optional[Dict[str, Any]],
+    base_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    block: Dict[str, Any] = dict(base_params)
+    block.update({
+        "runtime_ms": float(total_runtime_ms),
+        "found": bool(legacy is not None and legacy.get("found", False)),
+        "path_len": None,
+        "obj": None,
+        "feasible": False,
+        "violation": None,
+        "skipped": bool(skipped),
+        **_baseline_archive_stats(candidates),
+        "representative_unique_count": _baseline_representative_unique_count(reps),
+        "representatives": _baseline_rep_objectives(reps),
+    })
+    if legacy is not None:
+        obj = legacy.get("obj")
+        block.update({
+            "path_len": legacy.get("path_len"),
+            "obj": obj,
+            "feasible": bool(legacy.get("feasible", False)),
+            "violation": legacy.get("violation"),
+        })
+    return block
+
+
+def _run_rrt_candidate(env, start, goal, args, planner_seed: int, weight_spec: Dict[str, Any], index: int, eval_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    spec = _weight_spec_summary(weight_spec) or _weight_spec_summary(_weight_spec_from_lambda(float(weight_spec)))
+    energy_climb_weight = float(getattr(args, "baseline_energy_climb_weight", 2.0))
+    t0 = time.time()
+    path, _nodes = rrt_star(
+        env,
+        start,
+        goal,
+        n_iter=args.rrt_iter,
+        step_len=float(args.rrt_step_len),
+        goal_sample_rate=float(args.rrt_goal_sample_rate),
+        near_radius=float(args.rrt_near_radius),
+        threat_weight=float(spec["threat_weight"]),
+        length_weight=float(spec["length_weight"]),
+        energy_weight=float(spec["energy_weight"]),
+        energy_climb_weight=energy_climb_weight,
+        clearance_margin=float(args.desired_clearance_margin),
+        smooth=True,
+        smooth_n_try=int(args.rrt_smooth_n_try),
+        seed=planner_seed,
+    )
+    runtime_ms = (time.time() - t0) * 1000.0
+    record: Dict[str, Any] = {
+        "index": int(index),
+        "weight_spec": spec,
+        "weight_kind": spec.get("kind", ""),
+        "weight": spec.get("weight"),
+        "weight_label": spec.get("label", ""),
+        "length_weight": float(spec["length_weight"]),
+        "threat_weight": float(spec["threat_weight"]),
+        "energy_weight": float(spec["energy_weight"]),
+        "energy_climb_weight": float(energy_climb_weight),
+        "runtime_ms": float(runtime_ms),
+        "found": path is not None,
+        "path": path,
+        "path_len": env.path_length(path) if path is not None else None,
+        "obj": None,
+        "feasible": False,
+        "violation": None,
+        "detail": None,
+    }
+    if path is not None:
+        er = evaluate_path(env, path, **eval_kwargs)
+        record.update({
+            "obj": [float(er.obj[0]), float(er.obj[1]), float(er.obj[2])],
+            "feasible": bool(er.feasible),
+            "violation": float(er.violation),
+            "detail": {k: float(v) for k, v in er.detail.items()},
+        })
+    return record
+
+
+def _run_prm_candidate(env, start, goal, args, planner_seed: int, weight_spec: Dict[str, Any], index: int, eval_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    spec = _weight_spec_summary(weight_spec) or _weight_spec_summary(_weight_spec_from_lambda(float(weight_spec)))
+    energy_climb_weight = float(getattr(args, "baseline_energy_climb_weight", 2.0))
+    t0 = time.time()
+    path, graph = prm(
+        env,
+        start,
+        goal,
+        n_samples=args.prm_samples,
+        k=args.prm_k,
+        max_edge_len=args.prm_max_edge_len,
+        threat_weight=float(spec["threat_weight"]),
+        length_weight=float(spec["length_weight"]),
+        energy_weight=float(spec["energy_weight"]),
+        energy_climb_weight=energy_climb_weight,
+        seed=planner_seed,
+    )
+    runtime_ms = (time.time() - t0) * 1000.0
+    record: Dict[str, Any] = {
+        "index": int(index),
+        "weight_spec": spec,
+        "weight_kind": spec.get("kind", ""),
+        "weight": spec.get("weight"),
+        "weight_label": spec.get("label", ""),
+        "length_weight": float(spec["length_weight"]),
+        "threat_weight": float(spec["threat_weight"]),
+        "energy_weight": float(spec["energy_weight"]),
+        "energy_climb_weight": float(energy_climb_weight),
+        "runtime_ms": float(runtime_ms),
+        "found": path is not None,
+        "path": path,
+        "path_len": env.path_length(path) if path is not None else None,
+        "obj": None,
+        "feasible": False,
+        "violation": None,
+        "detail": None,
+        "stats": getattr(graph, "stats", {}) if graph is not None else {},
+    }
+    if path is not None:
+        er = evaluate_path(env, path, **eval_kwargs)
+        record.update({
+            "obj": [float(er.obj[0]), float(er.obj[1]), float(er.obj[2])],
+            "feasible": bool(er.feasible),
+            "violation": float(er.violation),
+            "detail": {k: float(v) for k, v in er.detail.items()},
+        })
+    return record
 
 
 def resolve_terrain_files(args) -> List[str]:
@@ -758,6 +1277,7 @@ def run_single_case(
 
     if invalid_case:
         moead_metric_block, _ = build_moead_metrics_block(args=args, log=None, runtime_ms=0.0, archive_size=0)
+        nsga3_metric_block = build_nsga3_metrics_block(args=args, log={'stop_reason': 'not_run'}, runtime_ms=0.0, archive_size=0)
         data = {
             'terrain_file': terrain_path,
             'terrain_seed': terrain_seed,
@@ -768,9 +1288,11 @@ def run_single_case(
             'goal': goal.tolist(),
             'invalid_case': True,
             'invalid': {'start_invalid': bool(invalid_start), 'goal_invalid': bool(invalid_goal), 'reason': reason},
-            'rrt': {'iter': args.rrt_iter, 'runtime_ms': 0.0, 'found': False, 'path_len': None, 'obj': None, 'feasible': False, 'violation': None, 'detail': None},
+            'rrt': {'iter': args.rrt_iter, 'threat_weight': args.rrt_threat_weight, 'runtime_ms': 0.0, 'found': False, 'path_len': None, 'obj': None, 'feasible': False, 'violation': None, 'detail': None},
+            'improved_rrt': {'iter': (args.improved_rrt_iter if int(args.improved_rrt_iter) > 0 else args.rrt_iter), 'runtime_ms': 0.0, 'found': False, 'path_len': None, 'obj': None, 'feasible': False, 'violation': None, 'detail': None, 'stats': None, 'skipped': bool(getattr(args, 'skip_improved_rrt', False))},
             'prm': {'samples': args.prm_samples, 'k': args.prm_k, 'max_edge_len': args.prm_max_edge_len, 'threat_weight': args.prm_threat_weight, 'runtime_ms': 0.0, 'found': False, 'path_len': None, 'obj': None, 'feasible': False, 'violation': None, 'detail': None},
             'moead': moead_metric_block,
+            'nsga3': nsga3_metric_block,
             'meta': meta,
         }
         with open(out_json, 'w', encoding='utf-8') as f:
@@ -781,8 +1303,10 @@ def run_single_case(
             'profile': getattr(args, 'profile_resolved', getattr(args, 'profile', 'auto')),
             'invalid_case': True, 'invalid_reason': reason,
             'rrt_found': False, 'rrt_ms': 0.0, 'rrt_obj': [float('inf')]*3, 'rrt_feasible': False,
+            'improved_rrt_found': False, 'improved_rrt_ms': 0.0, 'improved_rrt_obj': [float('inf')]*3, 'improved_rrt_feasible': False,
             'prm_found': False, 'prm_ms': 0.0, 'prm_obj': [float('inf')]*3, 'prm_feasible': False,
             'moead_ms': 0.0, 'moead_archive_size': 0, 'moead_stop_reason': 'not_run', 'moead_n_gen': 0, 'moead_mtoe_last': None, 'rep_objs': None,
+            'nsga3_ms': 0.0, 'nsga3_archive_size': 0, 'nsga3_stop_reason': 'not_run', 'nsga3_n_gen': 0, 'nsga3_rep_objs': None,
         }
 
     eval_step_cells = args.moead_eval_step / env.resolution
@@ -797,6 +1321,12 @@ def run_single_case(
         sample_step=eval_step_cells,
     )
     moead_only = bool(getattr(args, 'moead_only', False))
+    baseline_multi = (
+        bool(getattr(args, 'baseline_multi_weight', False))
+        or bool(str(getattr(args, 'baseline_threat_weights', '')).strip())
+        or bool(str(getattr(args, 'baseline_threat_weights_file', '')).strip())
+    )
+    baseline_weight_source_text = baseline_weight_source(args)
 
     path_rrt = None
     rrt_ms = 0.0
@@ -804,16 +1334,54 @@ def run_single_case(
     rrt_feasible = False
     rrt_violation = float('inf')
     rrt_detail = None
+    rrt_candidates: List[Dict[str, Any]] = []
+    rrt_reps: Dict[str, Dict[str, Any]] = {}
+    rrt_weights = baseline_weight_sweep(args, float(args.rrt_threat_weight))
+    legacy_rrt = None
     if not moead_only:
-        t0 = time.time()
-        path_rrt, _ = rrt_star(env, start, goal, n_iter=args.rrt_iter, seed=planner_seed)
-        rrt_ms = (time.time() - t0) * 1000.0
-        if path_rrt is not None:
-            rrt_er = evaluate_path(env, path_rrt, **eval_kwargs)
-            rrt_obj = [float(rrt_er.obj[0]), float(rrt_er.obj[1]), float(rrt_er.obj[2])]
-            rrt_feasible = bool(rrt_er.feasible)
-            rrt_violation = float(rrt_er.violation)
-            rrt_detail = dict(rrt_er.detail)
+        for idx_w, weight_spec in enumerate(rrt_weights):
+            rrt_candidates.append(_run_rrt_candidate(env, start, goal, args, planner_seed, weight_spec, idx_w, eval_kwargs))
+        rrt_ms = float(sum(float(c.get("runtime_ms", 0.0)) for c in rrt_candidates))
+        rrt_reps = _baseline_representatives(rrt_candidates)
+        legacy_rrt = _pick_baseline_legacy(rrt_reps)
+        if legacy_rrt is not None:
+            path_rrt = legacy_rrt.get("path")
+            rrt_obj = [float(v) for v in legacy_rrt.get("obj", [float('inf')]*3)]
+            rrt_feasible = bool(legacy_rrt.get("feasible", False))
+            rrt_violation = float(legacy_rrt.get("violation", float('inf')))
+            rrt_detail = legacy_rrt.get("detail")
+
+    path_improved_rrt = None
+    improved_rrt_ms = 0.0
+    improved_rrt_obj = [float('inf')]*3
+    improved_rrt_feasible = False
+    improved_rrt_violation = float('inf')
+    improved_rrt_detail = None
+    improved_rrt_stats = None
+    improved_rrt_iter = int(args.improved_rrt_iter) if int(args.improved_rrt_iter) > 0 else int(args.rrt_iter)
+    skip_improved_rrt = bool(getattr(args, 'skip_improved_rrt', False))
+    if not moead_only and not skip_improved_rrt:
+        t0i = time.time()
+        path_improved_rrt, _, improved_rrt_stats_obj = improved_rrt_star(
+            env,
+            start,
+            goal,
+            n_iter=improved_rrt_iter,
+            step_len=args.improved_rrt_step_len,
+            goal_sample_rate=args.improved_rrt_goal_sample_rate,
+            near_radius=args.improved_rrt_near_radius,
+            threat_weight=args.improved_rrt_threat_weight,
+            clearance_margin=args.desired_clearance_margin,
+            seed=planner_seed,
+        )
+        improved_rrt_ms = (time.time() - t0i) * 1000.0
+        improved_rrt_stats = dict(improved_rrt_stats_obj.__dict__)
+        if path_improved_rrt is not None:
+            improved_rrt_er = evaluate_path(env, path_improved_rrt, **eval_kwargs)
+            improved_rrt_obj = [float(improved_rrt_er.obj[0]), float(improved_rrt_er.obj[1]), float(improved_rrt_er.obj[2])]
+            improved_rrt_feasible = bool(improved_rrt_er.feasible)
+            improved_rrt_violation = float(improved_rrt_er.violation)
+            improved_rrt_detail = dict(improved_rrt_er.detail)
 
     path_prm = None
     prm_graph = None
@@ -823,17 +1391,23 @@ def run_single_case(
     prm_violation = float('inf')
     prm_detail = None
     prm_stats = {}
+    prm_candidates: List[Dict[str, Any]] = []
+    prm_reps: Dict[str, Dict[str, Any]] = {}
+    prm_weights = baseline_weight_sweep(args, float(args.prm_threat_weight))
+    legacy_prm = None
     if not moead_only:
-        t0b = time.time()
-        path_prm, prm_graph = prm(env, start, goal, n_samples=args.prm_samples, k=args.prm_k, max_edge_len=args.prm_max_edge_len, threat_weight=args.prm_threat_weight, seed=planner_seed)
-        prm_ms = (time.time() - t0b) * 1000.0
-        if path_prm is not None:
-            prm_er = evaluate_path(env, path_prm, **eval_kwargs)
-            prm_obj = [float(prm_er.obj[0]), float(prm_er.obj[1]), float(prm_er.obj[2])]
-            prm_feasible = bool(prm_er.feasible)
-            prm_violation = float(prm_er.violation)
-            prm_detail = dict(prm_er.detail)
-        prm_stats = getattr(prm_graph, 'stats', {}) if prm_graph is not None else {}
+        for idx_w, weight_spec in enumerate(prm_weights):
+            prm_candidates.append(_run_prm_candidate(env, start, goal, args, planner_seed, weight_spec, idx_w, eval_kwargs))
+        prm_ms = float(sum(float(c.get("runtime_ms", 0.0)) for c in prm_candidates))
+        prm_reps = _baseline_representatives(prm_candidates)
+        legacy_prm = _pick_baseline_legacy(prm_reps)
+        if legacy_prm is not None:
+            path_prm = legacy_prm.get("path")
+            prm_obj = [float(v) for v in legacy_prm.get("obj", [float('inf')]*3)]
+            prm_feasible = bool(legacy_prm.get("feasible", False))
+            prm_violation = float(legacy_prm.get("violation", float('inf')))
+            prm_detail = legacy_prm.get("detail")
+            prm_stats = legacy_prm.get("stats", {})
 
     t1 = time.time()
     moead_debug_log = os.path.join(out_dir, 'moead_debug.log') if args.moead_debug else None
@@ -897,29 +1471,120 @@ def run_single_case(
     )
     moead_ms = (time.time() - t1) * 1000.0
 
-    reps = None
-    if len(arch.items) > 0:
-        objs = np.array([it.er.obj for it in arch.items], dtype=float)
-        idx_f1 = int(np.argmin(objs[:, 0]))
-        idx_f2 = int(np.argmin(objs[:, 1]))
-        idx_f3 = int(np.argmin(objs[:, 2]))
-        mn = objs.min(axis=0)
-        mx = objs.max(axis=0)
-        denom = np.where((mx - mn) > 1e-12, (mx - mn), 1.0)
-        score = ((objs - mn) / denom) @ (np.array([1.0,1.0,1.0]) / 3.0)
-        reps = {'min_f1': idx_f1, 'min_f2': idx_f2, 'min_f3': idx_f3, 'compromise': int(np.argmin(score)), 'objs': objs}
+    reps = select_archive_representatives(arch)
+
+    nsga3_arch = None
+    skip_nsga3 = bool(getattr(args, 'skip_nsga3', False)) or bool(moead_only)
+    nsga3_log = {'stop_reason': 'skipped'} if skip_nsga3 else {}
+    nsga3_ms = 0.0
+    nsga3_reps = None
+    if not skip_nsga3:
+        t2 = time.time()
+        _, nsga3_arch, nsga3_log = nsga3(
+            env,
+            start,
+            goal,
+            n_gen=args.nsga3_max_gen,
+            pop=args.nsga3_pop,
+            K=args.K,
+            seed=planner_seed,
+            ref_dirs_count=args.nsga3_ref_dirs,
+            crossover_prob=args.nsga3_crossover_prob,
+            mutation_prob=args.nsga3_mutation_prob,
+            mutation_sigma=args.nsga3_mutation_sigma,
+            max_turn_deg=args.max_turn_deg,
+            soft_turn_deg=args.soft_turn_deg,
+            max_pitch_deg=args.max_pitch_deg,
+            soft_pitch_deg=args.soft_pitch_deg,
+            desired_clearance_margin=args.desired_clearance_margin,
+            tau_soft=args.tau_soft,
+            archive_size=args.archive_size,
+            archive_soft_limit=args.archive_soft_limit,
+            archive_grid_bins=args.archive_grid_bins,
+            archive_keep_extremes=bool(args.archive_keep_extremes),
+            eval_sample_step=eval_step_cells,
+            smooth_collision_step=smooth_step_cells,
+            init_astar_ratio=args.init_astar_ratio,
+            init_astar_threat_weight=args.init_astar_threat_weight,
+            init_astar_jitter_sigma=args.init_astar_jitter_sigma,
+            init_astar_max_paths=args.init_astar_max_paths,
+            init_astar_penalty_step=args.init_astar_penalty_step,
+            init_stratified_ratio=args.init_stratified_ratio,
+            init_stratified_lateral_frac=args.init_stratified_lateral_frac,
+            init_stratified_n_bands=args.init_stratified_n_bands,
+            init_stratified_progress_jitter=args.init_stratified_progress_jitter,
+            init_global_random_ratio=args.init_global_random_ratio,
+            weight_extreme_bias=args.weight_extreme_bias,
+        )
+        nsga3_ms = (time.time() - t2) * 1000.0
+        nsga3_reps = select_archive_representatives(nsga3_arch)
+
+    rrt_metric_block = _build_baseline_metrics_block(
+        skipped=moead_only,
+        total_runtime_ms=rrt_ms,
+        candidates=rrt_candidates,
+        reps=rrt_reps,
+        legacy=legacy_rrt,
+        base_params={
+            "iter": int(args.rrt_iter),
+            "step_len": float(args.rrt_step_len),
+            "near_radius": float(args.rrt_near_radius),
+            "goal_sample_rate": float(args.rrt_goal_sample_rate),
+            "smooth_n_try": int(args.rrt_smooth_n_try),
+        },
+    )
+    prm_metric_block = _build_baseline_metrics_block(
+        skipped=moead_only,
+        total_runtime_ms=prm_ms,
+        candidates=prm_candidates,
+        reps=prm_reps,
+        legacy=legacy_prm,
+        base_params={
+            "samples": int(args.prm_samples),
+            "k": int(args.prm_k),
+            "max_edge_len": float(args.prm_max_edge_len),
+        },
+    )
 
     vis_json = os.path.join(out_dir, f"visdata_{base_noext}_pseed{planner_seed:04d}_{file_tag}.json")
     title = f"Paths | {base_noext} size={size_tag} gen={args.moead_min_gen}-{args.moead_max_gen} pop={args.moead_pop} K={args.K} planner_seed={planner_seed}"
     vis_payload = build_vis_payload(
         terrain_file=terrain_path, terrain_seed=terrain_seed, planner_seed=planner_seed, size_tag=size_tag,
         inflate=args.inflate, map_hw=(env.H, env.W), start=start, goal=goal,
-        path_rrt=path_rrt, path_prm=path_prm, arch=arch, reps=reps, title=title, meta=meta,
-        extra={'planner_args': {'profile': getattr(args, 'profile_resolved', getattr(args, 'profile', 'auto')), 'moead_only': moead_only}, 'runtime_ms': {'rrt': float(rrt_ms), 'prm': float(prm_ms), 'moead': float(moead_ms)}}
+        path_rrt=path_rrt, path_improved_rrt=path_improved_rrt, path_prm=path_prm,
+        rrt_reps=_baseline_rep_paths(rrt_reps), prm_reps=_baseline_rep_paths(prm_reps),
+        rrt_archive_stats=_baseline_archive_stats(rrt_candidates),
+        prm_archive_stats=_baseline_archive_stats(prm_candidates),
+        arch=arch, reps=reps, title=title, meta=meta,
+        extra={
+            'planner_args': {
+                'profile': getattr(args, 'profile_resolved', getattr(args, 'profile', 'auto')),
+                'moead_only': moead_only,
+                'baseline_multi_weight': bool(baseline_multi),
+                'baseline_weight_count': int(len(rrt_weights)),
+                'baseline_threat_weights_file': str(getattr(args, 'baseline_threat_weights_file', '') or ''),
+                'baseline_weight_source': baseline_weight_source_text,
+                'baseline_threat_scale': float(args.baseline_threat_scale),
+                'baseline_energy_climb_weight': float(args.baseline_energy_climb_weight),
+                'skip_nsga3': bool(skip_nsga3),
+                'nsga3_max_gen': int(args.nsga3_max_gen),
+                'nsga3_pop': int(args.nsga3_pop),
+            },
+            'runtime_ms': {
+                'rrt': float(rrt_ms),
+                'improved_rrt': float(improved_rrt_ms),
+                'prm': float(prm_ms),
+                'moead': float(moead_ms),
+                'nsga3': float(nsga3_ms),
+            },
+            'nsga3_representatives': representative_objectives(nsga3_arch, nsga3_reps),
+        }
     )
     save_vis_payload(vis_json, vis_payload)
 
     moead_metric_block, moead_debug_payload = build_moead_metrics_block(args=args, log=log, runtime_ms=moead_ms, archive_size=len(arch.items))
+    nsga3_archive_size = len(nsga3_arch.items) if nsga3_arch is not None else 0
+    nsga3_metric_block = build_nsga3_metrics_block(args=args, log=nsga3_log, runtime_ms=nsga3_ms, archive_size=nsga3_archive_size)
     data = {
         'terrain_file': terrain_path,
         'terrain_seed': terrain_seed,
@@ -928,19 +1593,21 @@ def run_single_case(
         'map_size': {'H': int(env.H), 'W': int(env.W), 'tag': size_tag},
         'start': start.tolist(), 'goal': goal.tolist(), 'invalid_case': False,
         'invalid': {'start_invalid': False, 'goal_invalid': False, 'reason': []},
-        'rrt': {'iter': args.rrt_iter, 'runtime_ms': rrt_ms, 'found': path_rrt is not None, 'path_len': env.path_length(path_rrt) if path_rrt is not None else None, 'obj': rrt_obj if path_rrt is not None else None, 'feasible': rrt_feasible if path_rrt is not None else False, 'violation': rrt_violation if path_rrt is not None else None, 'detail': rrt_detail if path_rrt is not None else None, 'skipped': moead_only},
-        'prm': {'samples': args.prm_samples, 'k': args.prm_k, 'max_edge_len': args.prm_max_edge_len, 'threat_weight': args.prm_threat_weight, 'runtime_ms': prm_ms, 'found': path_prm is not None, 'path_len': env.path_length(path_prm) if path_prm is not None else None, 'obj': prm_obj if path_prm is not None else None, 'feasible': prm_feasible if path_prm is not None else False, 'violation': prm_violation if path_prm is not None else None, 'detail': prm_detail if path_prm is not None else None, 'stats': prm_stats, 'skipped': moead_only},
+        'rrt': rrt_metric_block,
+        'improved_rrt': {'iter': improved_rrt_iter, 'runtime_ms': improved_rrt_ms, 'found': path_improved_rrt is not None, 'path_len': env.path_length(path_improved_rrt) if path_improved_rrt is not None else None, 'obj': improved_rrt_obj if path_improved_rrt is not None else None, 'feasible': improved_rrt_feasible if path_improved_rrt is not None else False, 'violation': improved_rrt_violation if path_improved_rrt is not None else None, 'detail': improved_rrt_detail if path_improved_rrt is not None else None, 'stats': improved_rrt_stats, 'threat_weight': args.improved_rrt_threat_weight, 'skipped': moead_only or skip_improved_rrt},
+        'prm': prm_metric_block,
         'moead': moead_metric_block,
+        'nsga3': nsga3_metric_block,
         'meta': meta,
     }
+    data['nsga3']['skipped'] = bool(skip_nsga3)
 
-    rep_objs = None
-    if reps is not None:
-        def obj_of(name):
-            idx = int(reps[name])
-            return [float(x) for x in arch.items[idx].er.obj]
-        rep_objs = {'min_f1': obj_of('min_f1'), 'min_f2': obj_of('min_f2'), 'min_f3': obj_of('min_f3'), 'compromise': obj_of('compromise')}
+    rep_objs = representative_objectives(arch, reps)
+    if rep_objs is not None:
         data['moead']['representatives'] = rep_objs
+    nsga3_rep_objs = representative_objectives(nsga3_arch, nsga3_reps)
+    if nsga3_rep_objs is not None:
+        data['nsga3']['representatives'] = nsga3_rep_objs
 
     with open(out_json, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -971,10 +1638,16 @@ def run_single_case(
         'profile': getattr(args, 'profile_resolved', getattr(args, 'profile', 'auto')),
         'invalid_case': False,
         'rrt_found': path_rrt is not None, 'rrt_ms': float(rrt_ms), 'rrt_obj': rrt_obj, 'rrt_feasible': bool(rrt_feasible),
+        'improved_rrt_found': path_improved_rrt is not None, 'improved_rrt_ms': float(improved_rrt_ms), 'improved_rrt_obj': improved_rrt_obj, 'improved_rrt_feasible': bool(improved_rrt_feasible),
         'prm_found': path_prm is not None, 'prm_ms': float(prm_ms), 'prm_obj': prm_obj, 'prm_feasible': bool(prm_feasible),
+        'rrt_rep_objs': {k: v.get('obj') for k, v in _baseline_rep_objectives(rrt_reps).items()},
+        'prm_rep_objs': {k: v.get('obj') for k, v in _baseline_rep_objectives(prm_reps).items()},
         'moead_only': moead_only,
         'moead_ms': float(moead_ms), 'moead_archive_size': int(len(arch.items)), 'moead_stop_reason': log.get('stop_reason'),
         'moead_n_gen': int(log.get('n_gen', args.moead_max_gen)), 'moead_mtoe_last': None, 'rep_objs': rep_objs,
+        'nsga3_ms': float(nsga3_ms), 'nsga3_archive_size': int(nsga3_archive_size), 'nsga3_stop_reason': nsga3_log.get('stop_reason'),
+        'nsga3_n_gen': int(nsga3_log.get('n_gen', args.nsga3_max_gen)) if isinstance(nsga3_log, dict) else int(args.nsga3_max_gen),
+        'nsga3_rep_objs': nsga3_rep_objs,
     }
     return row
 
@@ -1095,9 +1768,11 @@ def aggregate_rows(rows: List[Dict[str, Any]], group_keys: Tuple[str, ...]) -> L
         item['n_valid'] = len(valid)
         if valid:
             item['archive_positive_rate'] = sum(1 for r in valid if safe_int(r.get('moead_archive_size')) and safe_int(r.get('moead_archive_size')) > 0) / len(valid)
+            item['nsga3_archive_positive_rate'] = sum(1 for r in valid if safe_int(r.get('nsga3_archive_size')) and safe_int(r.get('nsga3_archive_size')) > 0) / len(valid)
             item['rrt_found_rate'] = sum(1 for r in valid if str(r.get('rrt_found')).lower() in ('1', 'true', 'yes')) / len(valid)
+            item['improved_rrt_found_rate'] = sum(1 for r in valid if str(r.get('improved_rrt_found')).lower() in ('1', 'true', 'yes')) / len(valid)
             item['prm_found_rate'] = sum(1 for r in valid if str(r.get('prm_found')).lower() in ('1', 'true', 'yes')) / len(valid)
-            for col in ('moead_ms', 'moead_n_gen', 'moead_archive_size', 'rrt_ms', 'prm_ms'):
+            for col in ('moead_ms', 'moead_n_gen', 'moead_archive_size', 'nsga3_ms', 'nsga3_n_gen', 'nsga3_archive_size', 'rrt_ms', 'improved_rrt_ms', 'prm_ms'):
                 mean, std, n = mean_std(r.get(col) for r in valid)
                 item[f'{col}_mean'] = mean
                 item[f'{col}_std'] = std
@@ -1107,6 +1782,11 @@ def aggregate_rows(rows: List[Dict[str, Any]], group_keys: Tuple[str, ...]) -> L
                 reason = str(r.get('moead_stop_reason') or '')
                 stop_counts[reason] = stop_counts.get(reason, 0) + 1
             item['stop_reason_counts'] = '; '.join(f'{k}:{v}' for k, v in sorted(stop_counts.items()))
+            nsga3_stop_counts: Dict[str, int] = {}
+            for r in valid:
+                reason = str(r.get('nsga3_stop_reason') or '')
+                nsga3_stop_counts[reason] = nsga3_stop_counts.get(reason, 0) + 1
+            item['nsga3_stop_reason_counts'] = '; '.join(f'{k}:{v}' for k, v in sorted(nsga3_stop_counts.items()))
             for rep in ('min_f1', 'min_f2', 'min_f3', 'compromise'):
                 for j in range(3):
                     vals = []
@@ -1118,6 +1798,27 @@ def aggregate_rows(rows: List[Dict[str, Any]], group_keys: Tuple[str, ...]) -> L
                     item[f'{rep}_f{j+1}_mean'] = mean
                     item[f'{rep}_f{j+1}_std'] = std
                     item[f'{rep}_f{j+1}_n'] = n
+                    vals = []
+                    for r in valid:
+                        robj = _maybe_list(r.get(f'nsga3_{rep}_obj'))
+                        if robj is not None and len(robj) > j:
+                            vals.append(robj[j])
+                    mean, std, n = mean_std(vals)
+                    item[f'nsga3_{rep}_f{j+1}_mean'] = mean
+                    item[f'nsga3_{rep}_f{j+1}_std'] = std
+                    item[f'nsga3_{rep}_f{j+1}_n'] = n
+            for prefix in ('rrt', 'prm'):
+                for rep in ('min_f1', 'min_f2', 'min_f3'):
+                    for j in range(3):
+                        vals = []
+                        for r in valid:
+                            robj = _maybe_list(r.get(f'{prefix}_{rep}_obj'))
+                            if robj is not None and len(robj) > j:
+                                vals.append(robj[j])
+                        mean, std, n = mean_std(vals)
+                        item[f'{prefix}_{rep}_f{j+1}_mean'] = mean
+                        item[f'{prefix}_{rep}_f{j+1}_std'] = std
+                        item[f'{prefix}_{rep}_f{j+1}_n'] = n
         out.append(item)
     return out
 
@@ -1138,12 +1839,18 @@ def write_seed_log(seed_dir: str, terrain_seed: int, seed_summary: Dict[str, Any
         f'n_valid: {seed_summary.get("n_valid", 0)}',
         f'n_invalid: {seed_summary.get("n_invalid", 0)}',
         f'archive_positive_rate: {format_float(seed_summary.get("archive_positive_rate"))}',
+        f'nsga3_archive_positive_rate: {format_float(seed_summary.get("nsga3_archive_positive_rate"))}',
         f'rrt_found_rate: {format_float(seed_summary.get("rrt_found_rate"))}',
+        f'improved_rrt_found_rate: {format_float(seed_summary.get("improved_rrt_found_rate"))}',
         f'prm_found_rate: {format_float(seed_summary.get("prm_found_rate"))}',
+        f'nsga3_ms_mean_std: {format_float(seed_summary.get("nsga3_ms_mean"), 2)} +/- {format_float(seed_summary.get("nsga3_ms_std"), 2)}',
+        f'nsga3_n_gen_mean_std: {format_float(seed_summary.get("nsga3_n_gen_mean"), 2)} +/- {format_float(seed_summary.get("nsga3_n_gen_std"), 2)}',
+        f'nsga3_archive_size_mean_std: {format_float(seed_summary.get("nsga3_archive_size_mean"), 2)} +/- {format_float(seed_summary.get("nsga3_archive_size_std"), 2)}',
         f'moead_ms_mean±std: {format_float(seed_summary.get("moead_ms_mean"), 2)} ± {format_float(seed_summary.get("moead_ms_std"), 2)}',
         f'moead_n_gen_mean±std: {format_float(seed_summary.get("moead_n_gen_mean"), 2)} ± {format_float(seed_summary.get("moead_n_gen_std"), 2)}',
         f'moead_archive_size_mean±std: {format_float(seed_summary.get("moead_archive_size_mean"), 2)} ± {format_float(seed_summary.get("moead_archive_size_std"), 2)}',
         f'stop_reason_counts: {seed_summary.get("stop_reason_counts", "")}',
+        f'nsga3_stop_reason_counts: {seed_summary.get("nsga3_stop_reason_counts", "")}',
     ]
     with open(log_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines).rstrip() + '\n')
@@ -1151,10 +1858,10 @@ def write_seed_log(seed_dir: str, terrain_seed: int, seed_summary: Dict[str, Any
 
 def print_progress(cur_idx: int, total_runs: int, row: Optional[Dict[str, Any]], overall: Dict[str, Any], seed_summary: Optional[Dict[str, Any]] = None) -> None:
     row = row or {}
-    print(f'[progress] {cur_idx}/{total_runs} done | terrain_seed={row.get("terrain_seed")} planner_seed={row.get("planner_seed")} returncode={row.get("returncode", 0)} invalid={row.get("invalid_case", 0)} archive={row.get("moead_archive_size")} stop={row.get("moead_stop_reason")}')
-    print(f'          overall: valid={overall.get("n_valid",0)}/{overall.get("n_runs",0)} archive+={format_float(overall.get("archive_positive_rate"))} mean_ms={format_float(overall.get("moead_ms_mean"),2)}')
+    print(f'[progress] {cur_idx}/{total_runs} done | terrain_seed={row.get("terrain_seed")} planner_seed={row.get("planner_seed")} returncode={row.get("returncode", 0)} invalid={row.get("invalid_case", 0)} moead_archive={row.get("moead_archive_size")} nsga3_archive={row.get("nsga3_archive_size")} stop={row.get("moead_stop_reason")}')
+    print(f'          overall: valid={overall.get("n_valid",0)}/{overall.get("n_runs",0)} moead_archive+={format_float(overall.get("archive_positive_rate"))} nsga3_archive+={format_float(overall.get("nsga3_archive_positive_rate"))} mean_ms={format_float(overall.get("moead_ms_mean"),2)}')
     if seed_summary:
-        print(f'          seed-summary: valid={seed_summary.get("n_valid",0)}/{seed_summary.get("n_runs",0)} archive+={format_float(seed_summary.get("archive_positive_rate"))} mean_ms={format_float(seed_summary.get("moead_ms_mean"),2)}')
+        print(f'          seed-summary: valid={seed_summary.get("n_valid",0)}/{seed_summary.get("n_runs",0)} moead_archive+={format_float(seed_summary.get("archive_positive_rate"))} nsga3_archive+={format_float(seed_summary.get("nsga3_archive_positive_rate"))} mean_ms={format_float(seed_summary.get("moead_ms_mean"),2)}')
 
 
 def maybe_rotate_debug_logs(seed_dir: str, planner_seed: int, *, retries: int = 5, sleep_s: float = 0.25) -> List[str]:
@@ -1213,23 +1920,43 @@ def _extract_case_summary_from_metrics(run_dir: str, terrain_seed: Optional[int]
         row['planner_seed'] = data.get('planner_seed', planner_seed)
         row['invalid_case'] = int(bool(data.get('invalid_case')))
         rrt = data.get('rrt') or {}
+        improved_rrt = data.get('improved_rrt') or {}
         prm = data.get('prm') or {}
         mo = data.get('moead') or {}
+        ns = data.get('nsga3') or {}
         mtoe = mo.get('mtoe') or {}
         reps = mo.get('representatives') or {}
+        nsga3_reps = ns.get('representatives') or {}
         row['rrt_found'] = int(bool(rrt.get('found')))
         row['rrt_feasible'] = int(bool(rrt.get('feasible')))
         row['rrt_ms'] = rrt.get('runtime_ms')
         row['rrt_obj'] = repr(rrt.get('obj')) if isinstance(rrt.get('obj'), list) else rrt.get('obj')
+        row['improved_rrt_found'] = int(bool(improved_rrt.get('found')))
+        row['improved_rrt_feasible'] = int(bool(improved_rrt.get('feasible')))
+        row['improved_rrt_ms'] = improved_rrt.get('runtime_ms')
+        row['improved_rrt_obj'] = repr(improved_rrt.get('obj')) if isinstance(improved_rrt.get('obj'), list) else improved_rrt.get('obj')
         row['prm_found'] = int(bool(prm.get('found')))
         row['prm_feasible'] = int(bool(prm.get('feasible')))
         row['prm_ms'] = prm.get('runtime_ms')
         row['prm_obj'] = repr(prm.get('obj')) if isinstance(prm.get('obj'), list) else prm.get('obj')
+        for prefix, block in (('rrt', rrt), ('prm', prm)):
+            baseline_reps = block.get('representatives') or {}
+            if isinstance(baseline_reps, dict):
+                for name, item in baseline_reps.items():
+                    obj = item.get('obj') if isinstance(item, dict) else item
+                    row[f'{prefix}_{name}_obj'] = repr(obj) if isinstance(obj, list) else obj
+                    vals = _maybe_list(obj) or []
+                    for i, v in enumerate(vals[:3], start=1):
+                        row[f'{prefix}_{name}_f{i}'] = v
         row['moead_ms'] = mo.get('runtime_ms')
         row['moead_archive_size'] = mo.get('archive_size')
         row['moead_stop_reason'] = mo.get('stop_reason')
         row['moead_n_gen'] = mo.get('n_gen')
         row['moead_mtoe_last'] = mtoe.get('last')
+        row['nsga3_ms'] = ns.get('runtime_ms')
+        row['nsga3_archive_size'] = ns.get('archive_size')
+        row['nsga3_stop_reason'] = ns.get('stop_reason')
+        row['nsga3_n_gen'] = ns.get('n_gen')
         row['mtoe_enabled'] = int(bool(mtoe.get('enabled'))) if mtoe.get('enabled') is not None else None
         row['mtoe_mode'] = mtoe.get('mode')
         row['mtoe_tol_fun'] = mtoe.get('tol_fun')
@@ -1244,6 +1971,13 @@ def _extract_case_summary_from_metrics(run_dir: str, terrain_seed: Optional[int]
                 vals = _maybe_list(obj) or []
                 for i, v in enumerate(vals[:3], start=1):
                     row[f'{name}_f{i}'] = v
+        if isinstance(nsga3_reps, dict):
+            row['nsga3_rep_objs'] = nsga3_reps
+            for name, obj in nsga3_reps.items():
+                row[f'nsga3_{name}_obj'] = repr(obj)
+                vals = _maybe_list(obj) or []
+                for i, v in enumerate(vals[:3], start=1):
+                    row[f'nsga3_{name}_f{i}'] = v
         return row
     except Exception:
         return row
@@ -1262,7 +1996,22 @@ def enrich_case_row(row: Dict[str, Any], run_dir: str, terrain_path: str) -> Dic
             vals = _maybe_list(obj) or []
             for i, v in enumerate(vals[:3], start=1):
                 row[f'{name}_f{i}'] = v
+    nsga3_rep_objs = row.pop('nsga3_rep_objs', None)
+    if isinstance(nsga3_rep_objs, dict):
+        for name, obj in nsga3_rep_objs.items():
+            row[f'nsga3_{name}_obj'] = repr(obj)
+            vals = _maybe_list(obj) or []
+            for i, v in enumerate(vals[:3], start=1):
+                row[f'nsga3_{name}_f{i}'] = v
     for prefix in ('rrt', 'prm'):
+        rep_objs = row.pop(f'{prefix}_rep_objs', None)
+        if isinstance(rep_objs, dict):
+            for name, obj in rep_objs.items():
+                row[f'{prefix}_{name}_obj'] = repr(obj)
+                vals = _maybe_list(obj) or []
+                for i, v in enumerate(vals[:3], start=1):
+                    row[f'{prefix}_{name}_f{i}'] = v
+    for prefix in ('rrt', 'improved_rrt', 'prm'):
         obj = row.get(f'{prefix}_obj')
         if isinstance(obj, list):
             row[f'{prefix}_obj'] = repr(obj)
@@ -1270,8 +2019,10 @@ def enrich_case_row(row: Dict[str, Any], run_dir: str, terrain_path: str) -> Dic
                 row[f'{prefix}_f{i}'] = v
     row['invalid_case'] = int(bool(row.get('invalid_case')))
     row['rrt_found'] = int(bool(row.get('rrt_found')))
+    row['improved_rrt_found'] = int(bool(row.get('improved_rrt_found')))
     row['prm_found'] = int(bool(row.get('prm_found')))
     row['rrt_feasible'] = int(bool(row.get('rrt_feasible')))
+    row['improved_rrt_feasible'] = int(bool(row.get('improved_rrt_feasible')))
     row['prm_feasible'] = int(bool(row.get('prm_feasible')))
     return row
 
@@ -1308,7 +2059,7 @@ def run_reproducibility_sweep(args: argparse.Namespace, bench_args: List[str]) -
     print('[repro] planner_seed_count =', len(planner_seeds))
     print('[repro] total_runs =', total_runs)
     print('[repro] out_root =', effective_root)
-    print('[repro] mode =', 'direct-call moead only' if getattr(base_args, 'moead_only', False) else 'direct-call moead/rrt*/prm')
+    print('[repro] mode =', 'direct-call moead only' if getattr(base_args, 'moead_only', False) else 'direct-call moead/nsga3/rrt*/improved-rrt*/prm')
 
     for terrain_path in terrain_files:
         terrain_seed = parse_seed_from_filename(terrain_path)

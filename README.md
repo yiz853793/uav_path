@@ -14,15 +14,13 @@ uav_path_planning_mtoe_slim_3/
 |   |-- gen_dataset.py             # 批量生成地形
 |   |-- plan_from_terrain.py       # 从已有 .npz 执行单次规划
 |   |-- run_benchmark.py           # 批量路径规划 benchmark
-|   |-- run_reproducibility.py     # 多 planner seed 复现实验
 |   |-- run_suite.py               # baseline/full 套件
 |   |-- run_ablation_suite.py      # 消融实验套件
-|   |-- collect_results.py         # 汇总和分析结果
+|   |-- collect_results.py         # 汇总、分析和 Wilcoxon 显著性检验
 |   |-- plot_results.py            # 根据汇总数据绘图
 |   `-- render_from_vis_json.py    # 根据规划结果绘制地形/路径/Pareto 图
-|-- diagram_viz/                  # 流程图、结构图等非实验数据图
 |-- src/
-|   |-- algorithms/                # A*, PRM, RRT*, MOEA/D
+|   |-- algorithms/                # A*, PRM, RRT*, Improved RRT*, MOEA/D, NSGA-III
 |   |-- env/                       # 栅格环境和碰撞检测
 |   |-- experiment/                # 精简后的实验内部逻辑
 |   |-- models/                    # 路径、目标、约束、评估器
@@ -85,11 +83,18 @@ python -m experiments.run_benchmark --terrain_type hill_city --city_density 0.24
 运行 baseline/full 套件：
 
 ```bash
-python -m experiments.run_suite --out_root outputs/suite_hillcity024 --repeat_count 5 --planner_seed_base 0 --suite smoke -- --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20
+python -m experiments.run_suite --out_root outputs/suite_hillcity024_fair_sota --repeat_count 30 --planner_seed_base 0 --suite paper -- --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20 --profile quality --inflate 1.0 --rrt_iter 8000 --improved_rrt_iter 8000 --prm_samples 16000 --prm_k 64 --prm_max_edge_len 280 --prm_threat_weight 0.0 --improved_rrt_threat_weight 0.0 --moead_min_gen 80 --moead_max_gen 1600 --moead_pop 160 --moead_T 16 --nsga3_max_gen 1600 --nsga3_pop 160 --nsga3_ref_dirs 160 --K 30 --weight_extreme_bias 0.20
+```
+
+说明：该命令用于论文复现实验，避免对 PRM/RRT* 使用过低预算；PRM 与 Improved RRT* 的 threat 权重保持一致，MOEA/D 与 NSGA-III 使用相同 `pop/gen/K` 预算和同一组评价指标；NSGA-III 作为当前已接入的强基线/SOTA 类对照。若后续接入 Informed RRT*，应沿用本命令中的相同地图、seed、预算和评价设置。
+
+轻量 smoke 检查（只用于验证流程，不用于论文统计）：
+
+```bash
+python -m experiments.run_suite --out_root outputs/_smoke_nsga3_baseline --suite smoke --planner_seeds 0 --no_timestamp --progress_every 1 -- --glob outputs/_codex_nsga3_smoke/terrains/S/mountain_seed0003.npz --profile quick --inflate 0 --rrt_iter 200 --improved_rrt_iter 200 --prm_samples 400 --prm_k 8 --prm_max_edge_len 60 --prm_threat_weight 0.0 --improved_rrt_threat_weight 0.0 --moead_min_gen 2 --moead_max_gen 2 --moead_pop 8 --moead_T 3 --nsga3_max_gen 2 --nsga3_pop 8 --nsga3_ref_dirs 8 --K 8 --moead_eval_step 2.0 --moead_smooth_step 2.0 --start_goal_z_offset 20.0
 ```
 
 运行消融实验：
-
 ```bash
 python -m experiments.run_ablation_suite --out_root outputs/ablation_hillcity024 --repeat_count 5 --planner_seed_base 0 --suite smoke -- --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20
 ```
@@ -97,13 +102,13 @@ python -m experiments.run_ablation_suite --out_root outputs/ablation_hillcity024
 汇总已有结果：
 
 ```bash
-python -m experiments.collect_results --in_root outputs --out_dir outputs/_collected --exclude_invalid
+python -m experiments.collect_results --in_root outputs/suite_hillcity024_fair_sota --out_dir outputs/suite_hillcity024_fair_sota/_collected --exclude_invalid --group_by size,variant,method --wilcoxon_baselines PRM,NSGA-III-compromise --wilcoxon_methods MOEAD_compromise --wilcoxon_metrics f1,f2,f3 --wilcoxon_group_by size_tag,variant --wilcoxon_alternative two-sided
 ```
 
 绘制实验统计图：
 
 ```bash
-python -m experiments.plot_results --in_root outputs --out_dir outputs/_figures --kind auto
+python -m experiments.plot_results --mode collected --in_dir outputs/suite_hillcity024_fair_sota/_collected --out_dir outputs/suite_hillcity024_fair_sota/_figures
 ```
 
 从 `visdata_*.json` 渲染地形、路径和 Pareto 图：
@@ -146,7 +151,7 @@ python -m experiments.render_from_vis_json --input path/to/visdata_xxx.json --mo
 
 ### Benchmark 路径规划参数
 
-适用于 `experiments.run_benchmark`，也可转发给 `plan_from_terrain`、`run_reproducibility` 和 suite 脚本。
+适用于 `experiments.run_benchmark`，也可转发给 `plan_from_terrain` 和 suite 脚本。
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
@@ -172,10 +177,12 @@ python -m experiments.render_from_vis_json --input path/to/visdata_xxx.json --mo
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
 | `--rrt_iter`, `--rrt` | `4000` | RRT* 迭代次数。 |
+| `--improved_rrt_iter`, `--irrt_iter` | `0` | Improved RRT* 迭代次数；`<=0` 时复用 `--rrt_iter`。 |
+| `--improved_rrt_threat_weight` | `0.0` | Improved RRT* 威胁代价权重；公平对比时建议与 PRM threat 权重保持一致。 |
 | `--prm_samples`, `--prm_n` | `1200` | PRM 采样点数量。 |
 | `--prm_k` | `12` | PRM 每个节点连接的近邻数。 |
 | `--prm_max_edge_len`, `--prm_edge` | `30.0` | PRM 最大边长，单位米。 |
-| `--prm_threat_weight` | `0.0` | PRM 威胁代价权重。 |
+| `--prm_threat_weight` | `0.0` | PRM 威胁代价权重；公平对比时建议与 Improved RRT* threat 权重保持一致。 |
 
 ### MOEA/D 核心参数
 
@@ -191,6 +198,18 @@ python -m experiments.render_from_vis_json --input path/to/visdata_xxx.json --mo
 | `--archive_grid_bins` | `0` | 档案截断时的目标空间网格数，`0` 表示自动。 |
 | `--archive_keep_extremes` | `1` | 档案截断时是否保护目标极值解。 |
 | `--active_subproblem_ratio`, `--active_ratio` | `1.0` | 每代激活的子问题比例。 |
+
+### NSGA-III 基线参数
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `--nsga3_max_gen` | 空 | NSGA-III 最大迭代代数；不传时复用 `--moead_max_gen`。 |
+| `--nsga3_pop` | 空 | NSGA-III 种群规模；不传时复用 `--moead_pop`。 |
+| `--nsga3_ref_dirs` | `0` | 参考方向数量；`<=0` 时复用 `--nsga3_pop`。 |
+| `--nsga3_crossover_prob` | `0.90` | 交叉概率。 |
+| `--nsga3_mutation_prob` | `0.25` | 路径控制点变异概率。 |
+| `--nsga3_mutation_sigma` | `2.5` | 变异标准差，单位为栅格。 |
+| `--skip_nsga3` | `False` | 跳过 NSGA-III 基线。 |
 
 ### MOEA/D 增强与早停参数
 
@@ -233,7 +252,7 @@ python -m experiments.render_from_vis_json --input path/to/visdata_xxx.json --mo
 
 ### 复现实验与套件参数
 
-适用于 `run_reproducibility.py`、`run_suite.py` 和 `run_ablation_suite.py`。这些脚本用 `--` 分隔自身参数和转发给 benchmark 的参数。
+适用于 `run_suite.py` 和 `run_ablation_suite.py`。这些脚本用 `--` 分隔自身参数和转发给 benchmark 的参数。
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
@@ -252,7 +271,7 @@ python -m experiments.render_from_vis_json --input path/to/visdata_xxx.json --mo
 示例：
 
 ```bash
-python -m experiments.run_suite --out_root outputs/suite --repeat_count 5 --suite smoke -- --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20
+python -m experiments.run_suite --out_root outputs/suite_hillcity024_fair_sota --repeat_count 30 --planner_seed_base 0 --suite paper -- --terrain_type hill_city --city_density 0.24 --seed_from 0 --seed_to 20 --profile quality --inflate 1.0 --rrt_iter 8000 --improved_rrt_iter 8000 --prm_samples 16000 --prm_k 64 --prm_max_edge_len 280 --prm_threat_weight 0.0 --improved_rrt_threat_weight 0.0 --moead_min_gen 80 --moead_max_gen 1600 --moead_pop 160 --moead_T 16 --nsga3_max_gen 1600 --nsga3_pop 160 --nsga3_ref_dirs 160 --K 30 --weight_extreme_bias 0.20
 ```
 
 ### 数据处理与绘图参数
@@ -270,14 +289,26 @@ python -m experiments.run_suite --out_root outputs/suite --repeat_count 5 --suit
 | `--group_by` | `size,method` | 汇总分组字段，如 `size,method,moead_cfg`。 |
 | `--exclude_invalid` | `False` | 是否排除 invalid case。 |
 | `--no_paired` | `False` | 是否跳过 paired improvement 表。 |
+| `--no_wilcoxon` | `False` | 是否跳过 Wilcoxon 秩和检验。 |
+| `--wilcoxon_baselines` | `PRM,NSGA-III-compromise` | 作为对照组的方法名，逗号分隔。 |
+| `--wilcoxon_methods` | `MOEAD_compromise` | 待检验的方法名，逗号分隔。 |
+| `--wilcoxon_metrics` | `f1,f2,f3` | 检验指标。 |
+| `--wilcoxon_group_by` | `size_tag,variant` | Wilcoxon 分组字段。 |
+| `--wilcoxon_alternative` | `two-sided` | 备择假设：`two-sided`、`less`、`greater`。 |
+| `--wilcoxon_alpha` | `0.05` | 显著性水平。 |
 
 `plot_results.py`：
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `--in_root` | `outputs` | 包含 `reproducibility_cases.csv` 的根目录。 |
-| `--out_dir` | `<in_root>/_figures` | 图像输出目录。 |
-| `--kind` | `auto` | 绘图类型：`auto`、`method`、`ablation`、`suite_variant`。 |
+| `--mode` | `auto` | `collected` 读取 `results_long.csv`；`reproducibility` 读取 `reproducibility_cases.csv`。 |
+| `--in_root` | `outputs` | 根目录；auto/reproducibility 模式使用。 |
+| `--in_dir` | 空 | 包含 `results_long.csv` 的目录；collected 模式使用。 |
+| `--in_csv` | 空 | 显式指定 `results_long.csv`。 |
+| `--out_dir` | 自动 | 图像输出目录。 |
+| `--kind` | `auto` | reproducibility 模式绘图类型：`auto`、`method`、`ablation`、`suite_variant`。 |
+| `--methods` | 常用四类 | collected 模式下绘制的方法名，逗号分隔；空值表示全部。 |
+| `--exclude_invalid` | `False` | collected 模式下是否排除 invalid case。 |
 | `--dpi` | `220` | 输出图片 DPI。 |
 | `--no_summary` | `False` | 不输出 `plot_summary.csv`。 |
 
@@ -302,13 +333,12 @@ python -m experiments.run_suite --out_root outputs/suite --repeat_count 5 --suit
 | `reproducibility_overall.csv` | 复现实验总体统计。 |
 | `results_wide.csv` / `results_long.csv` | `collect_results.py` 生成的宽表和长表。 |
 | `summary_grouped.csv` | 按指定字段聚合后的统计表。 |
+| `wilcoxon_rank_sum.csv` | `collect_results.py` 生成的 Wilcoxon 秩和检验表，包含 p 值和显著性标记。 |
 
 ## 可视化分类
 
 数据可视化代码位于 `experiments/plot_results.py`、`experiments/render_from_vis_json.py` 和 `src/experiment/*plotting.py`，主要处理地图、路径、Pareto 前沿、benchmark 结果和消融结果。
 
-流程图和结构图代码统一放在 `diagram_viz/` 中，和实验结果绘图分开管理。
-
 ## 说明
 
-仓库目前只保留代码。`outputs/`、`terrains/`、`paper_assets/` 等目录会在运行脚本时按需重新生成。
+仓库目前只保留可复现实验代码、必要配置和轻量入口脚本。`outputs/`、`terrains/`、`diagram_viz/`、`workspace_archive/`、`paper_assets/` 等目录属于本地生成结果或论文工作区，不纳入 Git 版本管理。

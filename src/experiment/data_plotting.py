@@ -11,7 +11,6 @@ Input expected:
 Typical files are produced by:
   experiments/run_suite.py
   experiments/run_ablation_suite.py
-  experiments/run_reproducibility.py
 
 This script intentionally reads reproducibility_cases.csv directly, because it
 contains RRT*, PRM, MOEA/D representative solutions, runtime, MTOE generation,
@@ -37,7 +36,7 @@ import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -45,6 +44,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+DEFAULT_COLLECTED_METHODS = [
+    "RRT*_compromise",
+    "PRM_compromise",
+    "MOEAD_compromise",
+    "NSGA-III-compromise",
+]
 
 
 # -----------------------------
@@ -158,6 +165,12 @@ class CaseRow:
     rrt_f2: float
     rrt_f3: float
 
+    improved_rrt_found: int
+    improved_rrt_ms: float
+    improved_rrt_f1: float
+    improved_rrt_f2: float
+    improved_rrt_f3: float
+
     prm_found: int
     prm_ms: float
     prm_f1: float
@@ -169,6 +182,11 @@ class CaseRow:
     moead_archive_size: int
     moead_stop_reason: str
     moead_n_gen: float
+
+    nsga3_ms: float
+    nsga3_archive_size: int
+    nsga3_stop_reason: str
+    nsga3_n_gen: float
 
     min_f1_f1: float
     min_f1_f2: float
@@ -185,6 +203,22 @@ class CaseRow:
     compromise_f1: float
     compromise_f2: float
     compromise_f3: float
+
+    nsga3_min_f1_f1: float
+    nsga3_min_f1_f2: float
+    nsga3_min_f1_f3: float
+
+    nsga3_min_f2_f1: float
+    nsga3_min_f2_f2: float
+    nsga3_min_f2_f3: float
+
+    nsga3_min_f3_f1: float
+    nsga3_min_f3_f2: float
+    nsga3_min_f3_f3: float
+
+    nsga3_compromise_f1: float
+    nsga3_compromise_f2: float
+    nsga3_compromise_f3: float
 
 
 @dataclass
@@ -224,6 +258,12 @@ def read_cases_csv(csv_path: Path, in_root: Path) -> List[CaseRow]:
                 rrt_f2=to_float(r.get("rrt_f2")),
                 rrt_f3=to_float(r.get("rrt_f3")),
 
+                improved_rrt_found=to_int(r.get("improved_rrt_found"), 0),
+                improved_rrt_ms=to_float(r.get("improved_rrt_ms")),
+                improved_rrt_f1=to_float(r.get("improved_rrt_f1")),
+                improved_rrt_f2=to_float(r.get("improved_rrt_f2")),
+                improved_rrt_f3=to_float(r.get("improved_rrt_f3")),
+
                 prm_found=to_int(r.get("prm_found"), 0),
                 prm_ms=to_float(r.get("prm_ms")),
                 prm_f1=to_float(r.get("prm_f1")),
@@ -235,6 +275,11 @@ def read_cases_csv(csv_path: Path, in_root: Path) -> List[CaseRow]:
                 moead_archive_size=to_int(r.get("moead_archive_size"), 0),
                 moead_stop_reason=(r.get("moead_stop_reason") or "").strip() or "unknown",
                 moead_n_gen=to_float(r.get("moead_n_gen")),
+
+                nsga3_ms=to_float(r.get("nsga3_ms")),
+                nsga3_archive_size=to_int(r.get("nsga3_archive_size"), 0),
+                nsga3_stop_reason=(r.get("nsga3_stop_reason") or "").strip() or "unknown",
+                nsga3_n_gen=to_float(r.get("nsga3_n_gen")),
 
                 min_f1_f1=to_float(r.get("min_f1_f1")),
                 min_f1_f2=to_float(r.get("min_f1_f2")),
@@ -251,6 +296,22 @@ def read_cases_csv(csv_path: Path, in_root: Path) -> List[CaseRow]:
                 compromise_f1=to_float(r.get("compromise_f1")),
                 compromise_f2=to_float(r.get("compromise_f2")),
                 compromise_f3=to_float(r.get("compromise_f3")),
+
+                nsga3_min_f1_f1=to_float(r.get("nsga3_min_f1_f1")),
+                nsga3_min_f1_f2=to_float(r.get("nsga3_min_f1_f2")),
+                nsga3_min_f1_f3=to_float(r.get("nsga3_min_f1_f3")),
+
+                nsga3_min_f2_f1=to_float(r.get("nsga3_min_f2_f1")),
+                nsga3_min_f2_f2=to_float(r.get("nsga3_min_f2_f2")),
+                nsga3_min_f2_f3=to_float(r.get("nsga3_min_f2_f3")),
+
+                nsga3_min_f3_f1=to_float(r.get("nsga3_min_f3_f1")),
+                nsga3_min_f3_f2=to_float(r.get("nsga3_min_f3_f2")),
+                nsga3_min_f3_f3=to_float(r.get("nsga3_min_f3_f3")),
+
+                nsga3_compromise_f1=to_float(r.get("nsga3_compromise_f1")),
+                nsga3_compromise_f2=to_float(r.get("nsga3_compromise_f2")),
+                nsga3_compromise_f3=to_float(r.get("nsga3_compromise_f3")),
             ))
     return rows
 
@@ -276,6 +337,9 @@ def to_method_records(cases: Sequence[CaseRow], exclude_invalid: bool = True) ->
         if r.rrt_found and _is_finite(r.rrt_f1):
             out.append(MethodRecord(r.experiment, r.variant, r.terrain_tag, r.terrain_seed, r.planner_seed,
                                     "RRT*", 1, r.rrt_ms / 1000.0, r.rrt_f1, r.rrt_f2, r.rrt_f3))
+        if r.improved_rrt_found and _is_finite(r.improved_rrt_f1):
+            out.append(MethodRecord(r.experiment, r.variant, r.terrain_tag, r.terrain_seed, r.planner_seed,
+                                    "Improved RRT*", 1, r.improved_rrt_ms / 1000.0, r.improved_rrt_f1, r.improved_rrt_f2, r.improved_rrt_f3))
         if r.prm_found and _is_finite(r.prm_f1):
             out.append(MethodRecord(r.experiment, r.variant, r.terrain_tag, r.terrain_seed, r.planner_seed,
                                     "PRM", 1, r.prm_ms / 1000.0, r.prm_f1, r.prm_f2, r.prm_f3))
@@ -292,6 +356,18 @@ def to_method_records(cases: Sequence[CaseRow], exclude_invalid: bool = True) ->
             if found:
                 out.append(MethodRecord(r.experiment, r.variant, r.terrain_tag, r.terrain_seed, r.planner_seed,
                                         name, 1, r.moead_ms / 1000.0, f1, f2, f3))
+
+        nsga3_reps = [
+            ("NSGA-III-min_f1", r.nsga3_min_f1_f1, r.nsga3_min_f1_f2, r.nsga3_min_f1_f3),
+            ("NSGA-III-min_f2", r.nsga3_min_f2_f1, r.nsga3_min_f2_f2, r.nsga3_min_f2_f3),
+            ("NSGA-III-min_f3", r.nsga3_min_f3_f1, r.nsga3_min_f3_f2, r.nsga3_min_f3_f3),
+            ("NSGA-III-compromise", r.nsga3_compromise_f1, r.nsga3_compromise_f2, r.nsga3_compromise_f3),
+        ]
+        for name, f1, f2, f3 in nsga3_reps:
+            found = int(r.nsga3_archive_size > 0 and _is_finite(f1) and _is_finite(f2) and _is_finite(f3))
+            if found:
+                out.append(MethodRecord(r.experiment, r.variant, r.terrain_tag, r.terrain_seed, r.planner_seed,
+                                        name, 1, r.nsga3_ms / 1000.0, f1, f2, f3))
     return out
 
 
@@ -419,6 +495,101 @@ def write_summary_csv(cases: Sequence[CaseRow], records: Sequence[MethodRecord],
     return out_file
 
 
+def parse_csv_list(text: str) -> List[str]:
+    return [part.strip() for part in str(text or "").split(",") if part.strip()]
+
+
+def read_dict_csv(path: Path) -> List[Dict[str, Any]]:
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def row_found(row: Dict[str, Any]) -> bool:
+    return str(row.get("found", "")).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def row_valid(row: Dict[str, Any]) -> bool:
+    return str(row.get("invalid_case", "0")).strip().lower() not in {"1", "true", "yes", "y"}
+
+
+def resolve_results_long(args: argparse.Namespace) -> Path:
+    if args.in_csv:
+        return Path(args.in_csv).expanduser().resolve()
+
+    bases: List[Path] = []
+    if args.in_dir:
+        bases.append(Path(args.in_dir).expanduser().resolve())
+    bases.append(Path(args.in_root).expanduser().resolve())
+
+    candidates: List[Path] = []
+    seen = set()
+    for base in bases:
+        for path in (
+            base / "results_long.csv",
+            base / "_analysis" / "results_long.csv",
+            base / "_collected" / "results_long.csv",
+        ):
+            key = str(path)
+            if key not in seen:
+                candidates.append(path)
+                seen.add(key)
+
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError("No results_long.csv found. Tried: " + ", ".join(str(p) for p in candidates))
+
+
+def has_results_long(args: argparse.Namespace) -> bool:
+    try:
+        resolve_results_long(args)
+        return True
+    except Exception:
+        return False
+
+
+def write_dict_rows_csv(path: Path, rows: List[Dict[str, Any]]) -> Path:
+    ensure_dir(path.parent)
+    fields: List[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fields:
+                fields.append(key)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return path
+
+
+def build_collected_method_summary(
+    rows: List[Dict[str, Any]],
+    methods: List[str],
+    *,
+    exclude_invalid: bool,
+) -> List[Dict[str, Any]]:
+    if exclude_invalid:
+        rows = [row for row in rows if row_valid(row)]
+
+    all_methods = methods or sorted({str(row.get("method", "")) for row in rows if row.get("method")})
+    summary: List[Dict[str, Any]] = []
+    for method in all_methods:
+        method_rows = [row for row in rows if str(row.get("method", "")) == method]
+        found_rows = [row for row in method_rows if row_found(row)]
+        summary.append({
+            "method": method,
+            "n_total": len(method_rows),
+            "n_found": len(found_rows),
+            "success_rate": len(found_rows) / len(method_rows) if method_rows else math.nan,
+            "runtime_s_mean": mean(to_float(row.get("runtime_ms")) / 1000.0 for row in method_rows),
+            "f1_mean": mean(to_float(row.get("f1")) for row in found_rows),
+            "f2_mean": mean(to_float(row.get("f2")) for row in found_rows),
+            "f3_mean": mean(to_float(row.get("f3")) for row in found_rows),
+        })
+    return summary
+
+
 # -----------------------------
 # Figure generation
 # -----------------------------
@@ -429,7 +600,11 @@ def plot_method_comparisons(records: Sequence[MethodRecord], out_dir: Path, dpi:
     for r in records:
         by_ctx[(r.experiment, r.variant, r.terrain_tag)].append(r)
 
-    preferred_order = ["RRT*", "PRM", "MOEA/D-min_f1", "MOEA/D-min_f2", "MOEA/D-min_f3", "MOEA/D-compromise"]
+    preferred_order = [
+        "RRT*", "Improved RRT*", "PRM",
+        "MOEA/D-min_f1", "MOEA/D-min_f2", "MOEA/D-min_f3", "MOEA/D-compromise",
+        "NSGA-III-min_f1", "NSGA-III-min_f2", "NSGA-III-min_f3", "NSGA-III-compromise",
+    ]
     metric_specs = [
         ("f1", "Path length f1"),
         ("f2", "Threat cost f2"),
@@ -557,16 +732,50 @@ def plot_suite_variant(cases: Sequence[CaseRow], out_dir: Path, dpi: int) -> Lis
     return written
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Draw comparison figures from reproducibility_cases.csv.")
-    ap.add_argument("--in_root", type=str, default="outputs", help="Root directory containing result CSV files.")
-    ap.add_argument("--out_dir", type=str, default="", help="Output dir. Default: <in_root>/_figures")
-    ap.add_argument("--kind", choices=["auto", "method", "ablation", "suite_variant"], default="auto",
-                    help="Which figure group to draw.")
-    ap.add_argument("--dpi", type=int, default=220)
-    ap.add_argument("--no_summary", action="store_true", help="Do not write plot_summary.csv.")
-    args = ap.parse_args()
+def plot_collected_results(args: argparse.Namespace) -> List[Path]:
+    in_csv = resolve_results_long(args)
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else in_csv.parent / "data_figures"
+    ensure_dir(out_dir)
 
+    rows = read_dict_csv(in_csv)
+    summary = build_collected_method_summary(
+        rows,
+        parse_csv_list(args.methods),
+        exclude_invalid=bool(args.exclude_invalid),
+    )
+
+    written: List[Path] = []
+    written.append(write_dict_rows_csv(out_dir / "method_plot_summary.csv", summary))
+
+    labels = [str(row["method"]) for row in summary]
+    plot_specs = [
+        ("success_rate", "Success Rate", "success rate", "success_rate.png"),
+        ("runtime_s_mean", "Mean Runtime", "runtime / s", "runtime_mean.png"),
+        ("f1_mean", "Mean F1", "f1", "f1_mean.png"),
+        ("f2_mean", "Mean F2", "f2", "f2_mean.png"),
+        ("f3_mean", "Mean F3", "f3", "f3_mean.png"),
+    ]
+    for key, title, ylabel, filename in plot_specs:
+        out = save_barplot(
+            {label: to_float(row.get(key)) for label, row in zip(labels, summary)},
+            title,
+            ylabel,
+            out_dir / filename,
+            args.dpi,
+        )
+        if out:
+            written.append(out)
+
+    print("[plot_results] done")
+    print("  input            :", in_csv)
+    print("  output dir       :", out_dir)
+    print("  files written    :", len(written))
+    for p in written:
+        print("  wrote            :", p)
+    return written
+
+
+def plot_reproducibility_results(args: argparse.Namespace) -> List[Path]:
     in_root = Path(args.in_root).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else in_root / "_figures"
     ensure_dir(out_dir)
@@ -599,6 +808,35 @@ def main() -> None:
         print("  wrote            :", p)
     if len(written) > 30:
         print(f"  ... and {len(written) - 30} more")
+    return written
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description="Draw analysis figures from collected CSVs or reproducibility case CSVs.")
+    ap.add_argument("--mode", choices=["auto", "collected", "reproducibility"], default="auto",
+                    help="auto uses results_long.csv when available, otherwise reproducibility_cases.csv.")
+    ap.add_argument("--in_root", type=str, default="outputs", help="Root directory containing result CSV files.")
+    ap.add_argument("--in_dir", type=str, default="", help="Directory containing results_long.csv.")
+    ap.add_argument("--in_csv", type=str, default="", help="Explicit results_long.csv path.")
+    ap.add_argument("--out_dir", type=str, default="", help="Output dir.")
+    ap.add_argument("--kind", choices=["auto", "method", "ablation", "suite_variant"], default="auto",
+                    help="Reproducibility plotting group.")
+    ap.add_argument("--methods", type=str, default=",".join(DEFAULT_COLLECTED_METHODS),
+                    help="Comma-separated methods for collected results; empty means all.")
+    ap.add_argument("--exclude_invalid", action="store_true", help="Exclude invalid cases in collected results.")
+    ap.add_argument("--dpi", type=int, default=220)
+    ap.add_argument("--no_summary", action="store_true", help="Do not write plot_summary.csv for reproducibility plots.")
+    args = ap.parse_args(argv)
+
+    if args.mode == "collected":
+        plot_collected_results(args)
+        return
+
+    if args.mode == "auto" and args.kind == "auto" and has_results_long(args):
+        plot_collected_results(args)
+        return
+
+    plot_reproducibility_results(args)
 
 
 if __name__ == "__main__":
